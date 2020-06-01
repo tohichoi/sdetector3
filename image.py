@@ -1,3 +1,4 @@
+import copy
 import imutils
 import cv2
 import numpy as np
@@ -112,6 +113,21 @@ class ImageUtil:
         cv2.waitKey(waitkey)
         cv2.destroyWindow(title)
         cv2.waitKey(waitkey)
+
+    @staticmethod
+    def overlay_image(baseimage, overlay, x, y, w):
+        bw = baseimage.shape[1]
+        bh = baseimage.shape[0]
+
+        # sanity check
+        # newimage = copy.copy(baseimage)
+        newimage = baseimage
+        newoverlay = imutils.resize(overlay, w)
+        nw = newoverlay.shape[1]
+        nh = newoverlay.shape[0]
+        newimage[y:y+nh, x:x+nw] = newoverlay
+
+        return newimage, nw, nh
 
     @staticmethod
     def create_image_window(source, w, h, rw, rh, s):

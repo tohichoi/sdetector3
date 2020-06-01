@@ -19,9 +19,9 @@ output_queue = deque()
 
 FRAME_SCALE = 1.0
 # WIDTH X HEIGHT
-OBJECT_SIZE = (100 * 100, 150 * 300)
+OBJECT_SIZE = (100 * 100, 200 * 300)
 NSKIPFRAME = 0
-ROI = [404, 0, 1006, 680]
+ROI = [404, 0, 1070, 680]
 VIDEO_ORG_WIDTH = -1
 VIDEO_ORG_HEIGHT = -1
 VIDEO_WIDTH = -1
@@ -36,6 +36,7 @@ event_monitor = threading.Event()
 event_monitor.clear()
 event_show_image = threading.Event()
 event_show_image.clear()
+lock_show_image = threading.Lock()
 
 input_image = None
 model_image = None
@@ -173,8 +174,9 @@ def find_object(fgmask, object_size_threshold):
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
     x, y, w, h = cv2.boundingRect(contours[0])
     s=cv2.contourArea(contours[0])
-    logging.info(f'contourArea : {s}')
-    if s >= object_size_threshold[0]:
+    # logging.info(f'contourArea : {s}')
+    if object_size_threshold[1] > s >= object_size_threshold[0]:
+        # logging.info(f'contourArea : {s}, min: {object_size_threshold[0]}, max: {object_size_threshold[1]}')
         return x, y, w, h, s, contours[0]
 
     # method#2 ; contour area & convex hull
@@ -191,19 +193,80 @@ def find_object(fgmask, object_size_threshold):
     return [None] * 6
 
 
+def wait_for_scene_stable(q, w, h, q_window_name=None):
+    global input_image
+
+    prev_frame = None
+    is_first = True
+    stability = 0
+    maxlen = 10
+    dq = deque([], maxlen)
+
+    # w = Config.VIDEO_WIDTH
+    # h = Config.VIDEO_HEIGHT
+
+    nsamples = 100
+    widx = np.random.randint(w, size=nsamples)
+    hidx = np.random.randint(h, size=nsamples)
+
+    retry_count=0
+    # nskip=1
+    while True:
+        try:
+            frame = q.popleft()
+        except IndexError:
+            logging.info(f'No frame left in in_queue : retrying {retry_count + 1}')
+            if retry_count == 5:
+                break
+            retry_count += 1
+            time.sleep(0.5)
+            continue
+
+        if is_first:
+            prev_frame = frame
+            is_first = False
+            continue
+        # if nskip % 5 == 0:
+        # mse=((frame[hidx, widx[:nsamples], :] - prev_frame[hidx[:nsamples], widx[:nsamples], :]) ** 2).mean(axis=None)
+        mse = ((frame[hidx, widx, :] - prev_frame[hidx, widx, :]) ** 2).mean(axis=None)
+        dq.append(mse)
+        prev_frame = frame
+        # logging.info('fetch frame')
+        # logging.info(f'dqsize: {len(dq)}/{maxlen}')
+        if len(dq) == maxlen:
+            v = np.var(dq)
+            if v < 40.0:
+                stability += 1
+            else:
+                stability = 0
+
+            if stability > 10:
+                logging.info(f'Scene stable : var={v:.2f} stability={stability}')
+                return
+        # nskip+=1
+
+        if q_window_name:
+            # cv2.imshow(q_window_name, frame)
+            # cv2.putText(frame, )
+            with lock_show_image:
+                input_image = frame
+                event_show_image.set()
+
+
 def monitor_thread(in_queue, out_queue, mask):
     global model_image
     global input_image
     global fg_image
     global object_image
     global video_source
+    default_learning_rate = 0.01
 
     output_dir=os.path.join(os.path.dirname(video_source), os.path.splitext(os.path.basename(video_source))[0])
     logging.info(f'Started')
     logging.info(f'output dir : {output_dir}')
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
-    fgbg.setBackgroundRatio(0.01)
+    fgbg.setBackgroundRatio(default_learning_rate)
     # automatically chosen
     learning_rate = -1
     retry_count = 0
@@ -221,7 +284,6 @@ def monitor_thread(in_queue, out_queue, mask):
             logging.info(f'No frame left in in_queue : retrying {retry_count + 1}')
             if retry_count == 5:
                 break
-
             retry_count += 1
             time.sleep(0.5)
             continue
@@ -231,6 +293,8 @@ def monitor_thread(in_queue, out_queue, mask):
 
         roi_frame = ImageUtil.crop(frame, ROI)
         roi_frame = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        # roi_frame = cv2.equalizeHist(roi_frame)
+        roi_frame = cv2.GaussianBlur(roi_frame, None, 3)
 
         if prev_frame is None:
             prev_frame = roi_frame
@@ -241,29 +305,29 @@ def monitor_thread(in_queue, out_queue, mask):
         # scene change detection. input color should be preserved
         scene_changed, similarity = detect_scene_change(prev_frame, curr_frame, mask)
         if scene_changed:
-            logging.info(f'scene_changed: {similarity}')
+            logging.info(f'scene_changed {frame_count:04d}: {similarity}')
+            wait_for_scene_stable(in_queue, frame.shape[1], frame.shape[0], None)
             learning_rate = 1
             continue
 
-        if learning_rate >= 0:
-            logging.info(f'Re-learning scene from now')
+        if learning_rate == 1:
+            logging.info(f'Re-learning scene from now {frame_count:04d}')
             # fgbg = None
             # fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
-            fgmask = fgbg.apply(curr_frame, None, 1)
+            fgbg.apply(curr_frame, None, 1)
             # automatic learning rate
             # fgbg.setBackgroundRatio()
-            learning_rate = -1
+            learning_rate = default_learning_rate
 
         fgmask = fgbg.apply(curr_frame, None, learning_rate)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel, iterations=1)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        # event_show_image.wait()
+        # with lock_show_image:
         model_image = fgbg.getBackgroundImage()
         input_image = frame
         fg_image = fgmask
         object_image = copy.copy(frame)
-        # event_show_image.set()
 
         # TODO: remove debugging code
         cv2.imwrite(f'{output_dir}/{frame_count:04d}-model.png', model_image)
@@ -289,19 +353,20 @@ def monitor_thread(in_queue, out_queue, mask):
             y = y + ROI[1]
             # logging.info(f'tracking: {x}, {y}, {w}, {h}')
 
+            # with lock_show_image:
             input_image = frame
-
             object_image = frame
             cv2.rectangle(object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
             cv2.rectangle(object_image, (ROI[0], ROI[1]), (ROI[2], ROI[3]), (220, 220, 220), 2)
             cv2.drawContours(object_image, [con+[ROI[0], ROI[1]]], 0, (0, 0, 255), thickness=3)
-            cv2.putText(object_image, f'contourArea: {s}', (ROI[0], ROI[3]-20), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                        (0, 0, 0))
-            cv2.imwrite(f'data/act2/{frame_count:04d}-object.png', object_image)
+            cv2.putText(fg_image, f'contourArea {frame_count:04d}: {s}', (0, fg_image.shape[0]-20), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                        (255))
+            cv2.imwrite(f'{output_dir}/{frame_count:04d}-object.png', object_image)
+            logging.info(f'contourArea {frame_count:04d}: {s}')
 
         event_show_image.set()
 
-    logging.info(f'Stopped')
+    logging.info(f'Stopped {frame_count:04d}')
 
     event_stop_thread.set()
 
@@ -366,9 +431,13 @@ def main():
             cv2.imshow('source', input_image)
             cv2.imshow('Model', model_image)
             cv2.imshow('Difference', fg_image)
+            fg_image_color = cv2.cvtColor(fg_image, cv2.COLOR_GRAY2BGR)
+            model_image_color =  cv2.cvtColor(model_image, cv2.COLOR_GRAY2BGR)
+            object_image, nw, nh = ImageUtil.overlay_image(object_image, fg_image_color, 0, 0, int(object_image.shape[1] * 0.25))
+            object_image, _, _ = ImageUtil.overlay_image(object_image, model_image_color, 0, nh, int(object_image.shape[1] * 0.25))
             cv2.imshow('Detector', object_image)
             event_show_image.clear()
-            if cv2.waitKey(100) == ord('q'):
+            if cv2.waitKey(50) == ord('q'):
                 break
 
     event_monitor.set()
