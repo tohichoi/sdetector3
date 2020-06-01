@@ -190,8 +190,9 @@ class FeatureExtractor:
         return is_color
 
     def get_histogram(self, mask_image=None):
-        frame = self.image
-        frame2 = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        frame2 = self.image
+        if len(frame2.shape) == 3:
+            frame2 = cv2.cvtColor(frame2, cv2.COLOR_RGB2GRAY)
         # frame2 = cv2.GaussianBlur(frame2, (5, 5), 0)
         frame2 = cv2.medianBlur(frame2, 5)
 
