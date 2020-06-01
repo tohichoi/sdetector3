@@ -28,6 +28,8 @@ class MotionDetectionParam:
     # sdaled height
     VIDEO_HEIGHT = -1
     video_source = None
+    output_dir = None
+    DEBUG = True
 
 
 MDP = MotionDetectionParam
@@ -42,10 +44,13 @@ event_tracking = threading.Event()
 event_tracking.clear()
 event_monitor = threading.Event()
 event_monitor.clear()
+event_capture_ready = threading.Event()
+event_capture_ready.clear()
 
 
 class DisplayData:
-    def __init__(self):
+    def __init__(self, data_index=-1):
+        self.index = data_index
         self.input_image = None
         self.model_image = None
         self.fg_image = None
@@ -62,30 +67,30 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
     w = int(vcap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    frame_skip = 0
+    event_capture_ready.set()
+
+    frame_index = 0
     while not event_stop_thread.wait(0.001):
         ret, frame = vcap.read()
         if not ret:
             logging.info('Video decoding error occurred.')
             break
-            # vcap = cv2.VideoCapture(Config.video_src)
-            # continue
 
         if frame is None or len(frame) < 1:
             logging.info('no frame.')
             break
 
-        frame_skip += 1
-        if nskipframe > 0 and frame_skip % nskipframe != 0:
+        frame_index += 1
+        if nskipframe > 0 and frame_index % nskipframe != 0:
             continue
 
         if frame_scale != 1:
             frame = imutils.resize(frame, int(w * frame_scale))
 
-        disp_data = DisplayData()
-        disp_data.input_image = frame
-        in_queue.append(disp_data)
-        # logging.info(f'queue size : {len(in_queue)}')
+        display_data = DisplayData(frame_index)
+        display_data.input_image = frame
+        in_queue.append(display_data)
+
     vcap.release()
     logging.info(f'Stopped')
 
@@ -125,8 +130,8 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
     retry_count = 0
     while not event_stop_thread.wait(0.0001):
         try:
-            disp_data = in_queue.popleft()
-            frame = disp_data.input_image
+            display_data = in_queue.popleft()
+            frame = display_data.input_image
         except IndexError:
             logging.info(f'No frame left in in_queue : retrying {retry_count + 1}')
             if retry_count == 5:
@@ -138,8 +143,8 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
 
         retry_count = 0
 
-        disp_data.roi_frame = ImageUtil.crop(disp_data.input_image, MDP.ROI)
-        (success, box) = tracker.update(disp_data.roi_frame)
+        display_data.roi_frame = ImageUtil.crop(display_data.input_image, MDP.ROI)
+        (success, box) = tracker.update(display_data.roi_frame)
 
         if success:
             (x, y, w, h) = [int(v) for v in box]
@@ -147,13 +152,13 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
             y = y + MDP.ROI[1]
             logging.info(f'tracking: {x}, {y}, {w}, {h}')
 
-            disp_data.object_image = copy.copy(disp_data.input_image)
-            cv2.rectangle(disp_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
-            cv2.rectangle(disp_data.object_image, (MDP.ROI[0], MDP.ROI[1]),
+            display_data.object_image = copy.copy(display_data.input_image)
+            cv2.rectangle(display_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
+            cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]),
                           (MDP.ROI[2], MDP.ROI[3]),
                           (220, 220, 220), 2)
 
-            out_queue.append(disp_data)
+            out_queue.append(display_data)
         else:
             logging.info(f'object lost')
             # resume monitor thread
@@ -207,7 +212,7 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
     # nskip=1
     while True:
         try:
-            disp_data = q.popleft()
+            display_data = q.popleft()
         except IndexError:
             logging.info(f'No frame left in in_queue : retrying {retry_count + 1}')
             if retry_count == 5:
@@ -217,15 +222,15 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
             continue
 
         if is_first:
-            prev_frame = disp_data.input_image
+            prev_frame = display_data.input_image
             is_first = False
             continue
 
         # if nskip % 5 == 0:
         # mse=((frame[hidx, widx[:nsamples], :] - prev_frame[hidx[:nsamples], widx[:nsamples], :]) ** 2).mean(axis=None)
-        mse = ((disp_data.input_image[hidx, widx, :] - prev_frame[hidx, widx, :]) ** 2).mean(axis=None)
+        mse = ((display_data.input_image[hidx, widx, :] - prev_frame[hidx, widx, :]) ** 2).mean(axis=None)
         dq.append(mse)
-        prev_frame = disp_data.input_image
+        prev_frame = display_data.input_image
         # logging.info('fetch frame')
         # logging.info(f'dqsize: {len(dq)}/{maxlen}')
         if len(dq) == maxlen:
@@ -241,22 +246,20 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
         # nskip+=1
 
         if q_window_name:
-            display_queue.append(disp_data)
+            display_queue.append(display_data)
 
 
 def monitor_thread(in_queue, out_queue, mask):
     default_learning_rate = 0.01
 
-    output_dir = os.path.join(os.path.dirname(MDP.video_source), os.path.splitext(os.path.basename(MDP.video_source))[0])
     logging.info(f'Started')
-    logging.info(f'output dir : {output_dir}')
+    logging.info(f'output dir : {MDP.output_dir}')
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
     fgbg.setBackgroundRatio(default_learning_rate)
     # automatically chosen
     learning_rate = -1
     retry_count = 0
-    image_count = -1
     prev_image = None
     curr_image = None
     # wait until event is set,
@@ -264,64 +267,59 @@ def monitor_thread(in_queue, out_queue, mask):
         if event_stop_thread.wait(0.0001):
             break
 
+        if not event_capture_ready.wait(10.0):
+            logging.info(f'Waiting for capturing time out')
+            break
+
         try:
-            disp_data = in_queue.popleft()
+            display_data = in_queue.popleft()
         except IndexError:
-            logging.info(f'No frame left in in_queue : retrying {retry_count + 1}')
             if retry_count == 5:
+                logging.info(f'No frame left in in_queue : tried {retry_count + 1} seconds')
                 break
             retry_count += 1
-            time.sleep(0.5)
+            time.sleep(1)
             continue
 
         retry_count = 0
-        image_count += 1
 
-        disp_data.roi_image = ImageUtil.crop(disp_data.input_image, MDP.ROI)
-        disp_data.roi_image = cv2.cvtColor(disp_data.roi_image, cv2.COLOR_BGR2GRAY)
+        display_data.roi_image = ImageUtil.crop(display_data.input_image, MDP.ROI)
+        display_data.roi_image = cv2.cvtColor(display_data.roi_image, cv2.COLOR_BGR2GRAY)
         # not good result
         # roi_frame = cv2.equalizeHist(roi_frame)
-        disp_data.roi_image = cv2.GaussianBlur(disp_data.roi_image, None, 3)
+        display_data.roi_image = cv2.GaussianBlur(display_data.roi_image, None, 3)
 
         if prev_image is None:
-            prev_image = disp_data.roi_image
+            prev_image = display_data.roi_image
         else:
             prev_image = curr_image
-        curr_image = disp_data.roi_image
+        curr_image = display_data.roi_image
 
         # scene change detection. input color should be preserved
         scene_changed, similarity = detect_scene_change(prev_image, curr_image, mask)
         if scene_changed:
-            logging.info(f'scene_changed {image_count:04d}: {similarity}')
-            wait_for_scene_stable(in_queue, disp_data.input_image.shape[1], disp_data.input_image.shape[0], None)
+            logging.info(f'scene_changed {display_data.index:04d}: {similarity}')
+            wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0], None)
             learning_rate = 1
             continue
 
         if learning_rate == 1:
-            logging.info(f'Re-learning scene from now {image_count:04d}')
-            # fgbg = None
-            # fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
+            logging.info(f'Re-learning scene from now {display_data.index:04d}')
             fgbg.apply(curr_image, None, 1)
-            # automatic learning rate
-            # fgbg.setBackgroundRatio()
             learning_rate = default_learning_rate
 
         fgmask = fgbg.apply(curr_image, None, learning_rate)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel, iterations=1)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        disp_data.model_image = fgbg.getBackgroundImage()
-        disp_data.fg_image = fgmask
-        disp_data.object_image = disp_data.input_image
-
-        # TODO: remove debugging code
-        cv2.imwrite(f'{output_dir}/{image_count:04d}-model.png', disp_data.model_image)
-        cv2.imwrite(f'{output_dir}/{image_count:04d}-foreground.png', disp_data.fg_image)
+        display_data.model_image = fgbg.getBackgroundImage()
+        display_data.fg_image = fgmask
+        display_data.object_image = display_data.input_image
 
         # TODO: remove debugging code
         # obj_size=(0, ImageUtil.width(ROI)*ImageUtil.height(ROI))
         obj_size = MDP.OBJECT_SIZE
-        x, y, w, h, s, con = find_object(disp_data.fg_image, obj_size)
+        x, y, w, h, s, con = find_object(display_data.fg_image, obj_size)
         if w is not None:
             # logging.info(f'Object detected')
 
@@ -338,17 +336,17 @@ def monitor_thread(in_queue, out_queue, mask):
             y = y + MDP.ROI[1]
             # logging.info(f'tracking: {x}, {y}, {w}, {h}')
 
-            cv2.rectangle(disp_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
-            cv2.rectangle(disp_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]), (220, 220, 220), 2)
-            cv2.drawContours(disp_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
-            cv2.putText(disp_data.fg_image, f'contourArea {image_count:04d}: {s}',
-                        (0, disp_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
-            cv2.imwrite(f'{output_dir}/{image_count:04d}-object.png', disp_data.object_image)
-            logging.info(f'contourArea {image_count:04d}: {s}')
+            cv2.rectangle(display_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
+            cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]),
+                          (220, 220, 220), 2)
+            cv2.drawContours(display_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
+            cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {s}',
+                        (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
+            logging.info(f'contourArea {display_data.index:04d}: {s}')
 
-        display_queue.append(disp_data)
+        display_queue.append(display_data)
 
-    logging.info(f'Stopped {image_count:04d}')
+    logging.info(f'Stopped')
 
     event_stop_thread.set()
 
@@ -366,12 +364,33 @@ def read_video_params(vsrc):
     vcap.release()
 
 
-def main():
+def read_param(argv):
 
-    MDP.video_source = sys.argv[1]
+    # name of video file (eg. video.avi)
+    # or image sequence (eg. img_%02d.jpg, which will read samples like
+    # img_00.jpg, img_01.jpg, img_02.jpg, ...)
+    # or URL of video stream (eg.
+    # protocol://host:port/script_name?script_params|auth) or GStreamer pipeline string in gst-launch tool format in
+    # case if GStreamer is used as backend Note that each video stream or IP camera feed has its own URL scheme.
+    # Please refer to the documentation of source stream to know the right URL.
+    MDP.video_source = argv[1]
     if not os.path.exists(MDP.video_source):
-        logging.info(f'File not found : {MDP.video_source}')
-        return
+        # logging.info(f'File not found : {MDP.video_source}')
+        MDP.output_dir = f'MotionDetector-{DateUtil.get_current_timestring()}'
+    else:
+        MDP.output_dir = os.path.join(os.path.dirname(MDP.video_source),
+                                      os.path.splitext(os.path.basename(MDP.video_source))[0])
+    if MDP.DEBUG:
+        try:
+            os.mkdir(MDP.output_dir)
+        finally:
+            if not os.path.exists(MDP.output_dir):
+                raise RuntimeError(f"Cannot create directory : {MDP.output_dir}")
+
+
+def main_thread():
+
+    read_param(sys.argv)
 
     read_video_params(MDP.video_source)
 
@@ -393,31 +412,39 @@ def main():
     th_monitor.start()
 
     while True:
-        if event_stop_thread.wait(0.001):
+        q_len = len(display_queue)
+        if event_stop_thread.wait(0.001) and q_len < 1:
             break
 
-        if len(display_queue) > 0:
-            disp_data = display_queue.popleft()
+        if q_len > 0:
+            display_data = display_queue.popleft()
             # logging.info(f'Updating image')
-            cv2.imshow('source', disp_data.input_image)
-            cv2.imshow('Model', disp_data.model_image)
-            cv2.imshow('Difference', disp_data.fg_image)
-            fg_image_color = cv2.cvtColor(disp_data.fg_image, cv2.COLOR_GRAY2BGR)
-            model_image_color = cv2.cvtColor(disp_data.model_image, cv2.COLOR_GRAY2BGR)
-            disp_data.object_image, nw, nh = ImageUtil.overlay_image(disp_data.object_image, fg_image_color, 0, 0,
-                                                                     int(disp_data.object_image.shape[1] * 0.25))
-            cv2.rectangle(disp_data.object_image, (0, 0), (nw, nh), (127, 127, 0), 3)
-            disp_data.object_image, nw, nh = ImageUtil.overlay_image(disp_data.object_image, model_image_color, 0, nh,
-                                                                   int(disp_data.object_image.shape[1] * 0.25))
-            cv2.rectangle(disp_data.object_image, (0, nh+3), (nw, 2*nh+3), (0, 127, 127), 3)
+            cv2.imshow('source', display_data.input_image)
+            cv2.imshow('Model', display_data.model_image)
+            cv2.imshow('Difference', display_data.fg_image)
+            fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
+            model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
+            display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, fg_image_color, 0, 0,
+                                                                        int(display_data.object_image.shape[1] * 0.25))
+            cv2.rectangle(display_data.object_image, (0, 0), (nw, nh), (127, 127, 0), 3)
+            display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, model_image_color, 0,
+                                                                        nh,
+                                                                        int(display_data.object_image.shape[1] * 0.25))
+            cv2.rectangle(display_data.object_image, (0, nh + 3), (nw, 2 * nh + 3), (0, 127, 127), 3)
+            cv2.imshow('Detector', display_data.object_image)
 
-            cv2.imshow('Detector', disp_data.object_image)
+            if MDP.DEBUG:
+                cv2.imwrite(f'{MDP.output_dir}/{display_data.index:08d}-model.png', display_data.model_image)
+                cv2.imwrite(f'{MDP.output_dir}/{display_data.index:08d}-foreground.png', display_data.fg_image)
+                cv2.imwrite(f'{MDP.output_dir}/{display_data.index:08d}-object.png', display_data.object_image)
 
         if cv2.waitKey(50) == ord('q'):
             break
 
     event_monitor.set()
     event_stop_thread.set()
+
+    logging.info(f'Stopped')
 
 
 if __name__ == '__main__':
@@ -428,4 +455,4 @@ if __name__ == '__main__':
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    main()
+    main_thread()
