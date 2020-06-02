@@ -1,8 +1,12 @@
 import os
+import re
 import sys
 import threading
 import time
 import copy
+from datetime import datetime
+from queue import Queue
+
 import imutils
 import numpy as np
 import cv2
@@ -35,8 +39,9 @@ class MotionDetectionParam:
 MDP = MotionDetectionParam
 
 input_queue = deque()
-output_queue = deque()
 display_queue = deque()
+object_queue = Queue()
+file_queue = Queue()
 
 event_stop_thread = threading.Event()
 event_stop_thread.clear()
@@ -44,13 +49,16 @@ event_tracking = threading.Event()
 event_tracking.clear()
 event_monitor = threading.Event()
 event_monitor.clear()
+event_object_writing = threading.Event()
+event_object_writing.clear()
 event_capture_ready = threading.Event()
 event_capture_ready.clear()
 
 
 class DisplayData:
-    def __init__(self, data_index=-1):
-        self.index = data_index
+    def __init__(self, index=0, timestamp=0):
+        self.index = index
+        self.time = timestamp if timestamp > 0 else datetime.utcnow()
         self.input_image = None
         self.model_image = None
         self.fg_image = None
@@ -87,7 +95,7 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
         if frame_scale != 1:
             frame = imutils.resize(frame, int(w * frame_scale))
 
-        display_data = DisplayData(frame_index)
+        display_data = DisplayData(index=frame_index-1)
         display_data.input_image = frame
         in_queue.append(display_data)
 
@@ -249,7 +257,7 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
             display_queue.append(display_data)
 
 
-def monitor_thread(in_queue, out_queue, mask):
+def monitor_thread(in_queue, obj_queue, mask):
     default_learning_rate = 0.01
 
     logging.info(f'Started')
@@ -265,10 +273,12 @@ def monitor_thread(in_queue, out_queue, mask):
     # wait until event is set,
     while event_monitor.wait():
         if event_stop_thread.wait(0.0001):
+            obj_queue.put(None)
             break
 
         if not event_capture_ready.wait(10.0):
             logging.info(f'Waiting for capturing time out')
+            obj_queue.put(None)
             break
 
         try:
@@ -276,6 +286,7 @@ def monitor_thread(in_queue, out_queue, mask):
         except IndexError:
             if retry_count == 5:
                 logging.info(f'No frame left in in_queue : tried {retry_count + 1} seconds')
+                obj_queue.put(None)
                 break
             retry_count += 1
             time.sleep(1)
@@ -342,7 +353,7 @@ def monitor_thread(in_queue, out_queue, mask):
             cv2.drawContours(display_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
             cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {s}',
                         (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
-            logging.info(f'contourArea {display_data.index:04d}: {s}')
+            logging.info(f'Object size {display_data.index:04d}: {s}')
 
         display_queue.append(display_data)
 
@@ -383,9 +394,72 @@ def read_param(argv):
     if MDP.DEBUG:
         try:
             os.mkdir(MDP.output_dir)
+        except FileExistsError:
+            pass
         finally:
             if not os.path.exists(MDP.output_dir):
                 raise RuntimeError(f"Cannot create directory : {MDP.output_dir}")
+
+
+def object_writing_thread(q, output_dir):
+    logging.info(f'Started')
+    while True:
+        # don't need to rush for writing
+        if event_stop_thread.wait(1.0):
+            break
+
+        # caller 에서 저장할 이미지를 큐에 모두 put 한 다음 writing 을 해야하기 때문에
+        # 이벤트를 기다린다
+        event_object_writing.wait()
+
+        fn = None
+        vcap_out = None
+        FPS = 8
+
+        while True:
+            object_data = q.get()
+            # producer should put 'None' to queue for marking end of image
+            if object_data is None:
+                break
+
+            if not fn:
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                vcap_out = cv2.VideoWriter(fn, fourcc, FPS, (MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT))
+
+                # logging.info(f'{threading.get_ident()} write_framebuf started : {self.q.qsize()}')
+                s = object_data.time.replace(microsecond=0).isoformat()
+                s = re.sub('[-:]', '', s)
+                fn = output_dir + s + ".mp4"
+
+                logging.info(f'Writing {fn}')
+
+            vcap_out.write(object_data.object_image)
+
+        event_object_writing.clear()
+        vcap_out.release()
+
+    logging.info(f'Finished')
+
+
+def writing_display_image_thread(q, output_dir):
+    logging.info(f'Started')
+    while True:
+        if not event_capture_ready.wait():
+            logging.info(f'Waiting for capturing time out')
+            break
+
+        display_data = q.get()
+        if display_data is None:
+            break
+
+        if not os.path.exists(output_dir):
+            logging.info(f'Directory not exists : {output_dir}')
+            continue
+
+        cv2.imwrite(f'{output_dir}/{display_data.index:08d}-model.png', display_data.model_image)
+        cv2.imwrite(f'{output_dir}/{display_data.index:08d}-foreground.png', display_data.fg_image)
+        cv2.imwrite(f'{output_dir}/{display_data.index:08d}-object.png', display_data.object_image)
+    logging.info(f'Finished')
 
 
 def main_thread():
@@ -402,7 +476,10 @@ def main_thread():
     th_capture = threading.Thread(None, capture_thread, "capture_thread",
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
-                                  args=(input_queue, output_queue, mask))
+                                  args=(input_queue, object_queue, mask))
+    th_writing = threading.Thread(None, writing_display_image_thread, "display_image_writing_thread",
+                                  args=(file_queue, MDP.output_dir))
+
 
     # start capture
     th_capture.start()
@@ -411,9 +488,12 @@ def main_thread():
     event_monitor.set()
     th_monitor.start()
 
+    th_writing.start()
+
     while True:
         q_len = len(display_queue)
-        if event_stop_thread.wait(0.001) and q_len < 1:
+        if event_stop_thread.wait(0.0001) and q_len < 1:
+            file_queue.put(None)
             break
 
         if q_len > 0:
@@ -434,11 +514,10 @@ def main_thread():
             cv2.imshow('Detector', display_data.object_image)
 
             if MDP.DEBUG:
-                cv2.imwrite(f'{MDP.output_dir}/{display_data.index:08d}-model.png', display_data.model_image)
-                cv2.imwrite(f'{MDP.output_dir}/{display_data.index:08d}-foreground.png', display_data.fg_image)
-                cv2.imwrite(f'{MDP.output_dir}/{display_data.index:08d}-object.png', display_data.object_image)
+                file_queue.put(display_data)
 
         if cv2.waitKey(50) == ord('q'):
+            file_queue.put(None)
             break
 
     event_monitor.set()
