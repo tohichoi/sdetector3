@@ -25,22 +25,23 @@ class MotionDetectionParam:
     OBJECT_SIZE = (100 * 100, 200 * 300)
     NUM_SKIP_FRAME = 0
     ROI = [404, 0, 1070, 680]
+    SCENE_CHANGE_THRESHOLD = 0.4
     VIDEO_ORG_WIDTH = -1
     VIDEO_ORG_HEIGHT = -1
-    # sdaled width
+    # scaled width
     VIDEO_WIDTH = -1
-    # sdaled height
+    # scaled height
     VIDEO_HEIGHT = -1
     video_source = None
     output_dir = None
-    DEBUG = True
+    DEBUG = False
 
 
 MDP = MotionDetectionParam
 
 input_queue = deque()
 display_queue = deque()
-object_queue = Queue()
+object_list = list()
 file_queue = Queue()
 
 event_stop_thread = threading.Event()
@@ -95,7 +96,7 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
         if frame_scale != 1:
             frame = imutils.resize(frame, int(w * frame_scale))
 
-        display_data = DisplayData(index=frame_index-1)
+        display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
         in_queue.append(display_data)
 
@@ -111,7 +112,7 @@ def detect_scene_change(prev_image, curr_image, mask):
     ch = cft.get_histogram(mask)
 
     similarity = cft.compare_histogram(ph, ch)
-    scene_changed = similarity >= 0.4
+    scene_changed = similarity >= MDP.SCENE_CHANGE_THRESHOLD
 
     return scene_changed, similarity
 
@@ -131,9 +132,9 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
 
     tracker = OPENCV_OBJECT_TRACKERS["csrt"]()
 
-    curr_roi_frame = ImageUtil.crop(curr_image, MDP.ROI)
+    # curr_roi_frame = ImageUtil.crop(curr_image, MDP.ROI)
 
-    tracker.init(curr_roi_frame, init_bbox)
+    tracker.init(curr_image, init_bbox)
 
     retry_count = 0
     while not event_stop_thread.wait(0.0001):
@@ -166,7 +167,8 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
                           (MDP.ROI[2], MDP.ROI[3]),
                           (220, 220, 220), 2)
 
-            out_queue.append(display_data)
+            display_queue.append(display_data)
+            out_queue.put(display_data)
         else:
             logging.info(f'object lost')
             # resume monitor thread
@@ -249,13 +251,17 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
                 stability = 0
 
             if stability > 10:
-                logging.info(f'Scene stable : var={v:.2f} stability={stability}')
+                logging.info(f'Scene stabilized: var={v:.2f} stability={stability}')
                 return
         # nskip+=1
 
         if q_window_name:
             display_queue.append(display_data)
 
+
+def track_object(obj_list):
+    # Tracking Analysis.ipynb 참조
+    pass
 
 def monitor_thread(in_queue, obj_queue, mask):
     default_learning_rate = 0.01
@@ -335,26 +341,27 @@ def monitor_thread(in_queue, obj_queue, mask):
             # logging.info(f'Object detected')
 
             # METHOD1 : Using tracker
-            # th=threading.Thread(None, tracking_thread, "tracking_thread",
-            #                     args=(curr_frame, in_queue, (x, y, w, h), out_queue))
-            # th.start()
-            # event_tracking.set()
-            # # pause me
-            # event_monitor.clear()
+            th = threading.Thread(None, tracking_thread, "tracking_thread",
+                                  args=(curr_image, in_queue, (x, y, w, h), obj_queue))
+            th.start()
+            event_tracking.set()
+            # pause me
+            event_monitor.clear()
 
             # METHOD2 : Just print out
-            x = x + MDP.ROI[0]
-            y = y + MDP.ROI[1]
-            # logging.info(f'tracking: {x}, {y}, {w}, {h}')
+            # x = x + MDP.ROI[0]
+            # y = y + MDP.ROI[1]
+            # # logging.info(f'tracking: {x}, {y}, {w}, {h}')
+            #
+            # cv2.rectangle(display_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
+            # cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]),
+            #               (220, 220, 220), 2)
+            # cv2.drawContours(display_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
+            # cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {s}',
+            #             (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
+            # logging.info(f'Object size {display_data.index:04d}: {s}')
 
-            cv2.rectangle(display_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
-            cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]),
-                          (220, 220, 220), 2)
-            cv2.drawContours(display_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
-            cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {s}',
-                        (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
-            logging.info(f'Object size {display_data.index:04d}: {s}')
-
+        object_list.append((1 if w is not None else 0, display_data))
         display_queue.append(display_data)
 
     logging.info(f'Stopped')
@@ -376,7 +383,6 @@ def read_video_params(vsrc):
 
 
 def read_param(argv):
-
     # name of video file (eg. video.avi)
     # or image sequence (eg. img_%02d.jpg, which will read samples like
     # img_00.jpg, img_01.jpg, img_02.jpg, ...)
@@ -463,7 +469,6 @@ def writing_display_image_thread(q, output_dir):
 
 
 def main_thread():
-
     read_param(sys.argv)
 
     read_video_params(MDP.video_source)
@@ -476,10 +481,9 @@ def main_thread():
     th_capture = threading.Thread(None, capture_thread, "capture_thread",
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
-                                  args=(input_queue, object_queue, mask))
+                                  args=(input_queue, object_list, mask))
     th_writing = threading.Thread(None, writing_display_image_thread, "display_image_writing_thread",
                                   args=(file_queue, MDP.output_dir))
-
 
     # start capture
     th_capture.start()
@@ -499,19 +503,29 @@ def main_thread():
         if q_len > 0:
             display_data = display_queue.popleft()
             # logging.info(f'Updating image')
-            cv2.imshow('source', display_data.input_image)
-            cv2.imshow('Model', display_data.model_image)
-            cv2.imshow('Difference', display_data.fg_image)
-            fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
-            model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
-            display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, fg_image_color, 0, 0,
-                                                                        int(display_data.object_image.shape[1] * 0.25))
-            cv2.rectangle(display_data.object_image, (0, 0), (nw, nh), (127, 127, 0), 3)
-            display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, model_image_color, 0,
-                                                                        nh,
-                                                                        int(display_data.object_image.shape[1] * 0.25))
-            cv2.rectangle(display_data.object_image, (0, nh + 3), (nw, 2 * nh + 3), (0, 127, 127), 3)
-            cv2.imshow('Detector', display_data.object_image)
+            if display_data.input_image is not None:
+                cv2.imshow('source', display_data.input_image)
+            if display_data.model_image is not None:
+                cv2.imshow('Model', display_data.model_image)
+            if display_data.fg_image is not None:
+                cv2.imshow('Difference', display_data.fg_image)
+            if display_data.object_image is not None and display_data.fg_image is not None and display_data.model_image is not None:
+                fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
+                model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
+                display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, fg_image_color,
+                                                                            0, 0,
+                                                                            int(display_data.object_image.shape[
+                                                                                    1] * 0.25))
+                cv2.rectangle(display_data.object_image, (0, 0), (nw, nh), (127, 127, 0), 3)
+                display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image,
+                                                                            model_image_color, 0,
+                                                                            nh,
+                                                                            int(display_data.object_image.shape[
+                                                                                    1] * 0.25))
+                cv2.rectangle(display_data.object_image, (0, nh + 3), (nw, 2 * nh + 3), (0, 127, 127), 3)
+                cv2.imshow('Detector', display_data.object_image)
+            elif display_data.object_image is not None:
+                cv2.imshow('Detector', display_data.object_image)
 
             if MDP.DEBUG:
                 file_queue.put(display_data)
