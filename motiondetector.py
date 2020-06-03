@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from image import ImageUtil, VideoUtil, ImageLoader, FeatureExtractor
 # from fileutil import *
 import logging
-from fileutil import create_logging
+from fileutil import create_logging, VideoFileWritingThread, FileUtil
 from mydateutil import DateUtil
 from collections import deque
 
@@ -26,6 +26,8 @@ class MotionDetectionParam:
     NUM_SKIP_FRAME = 0
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
+    MAX_OBJECT_SLICE = 200
+    MOVING_WINDOW_SIZE = 20
     VIDEO_ORG_WIDTH = -1
     VIDEO_ORG_HEIGHT = -1
     # scaled width
@@ -35,13 +37,14 @@ class MotionDetectionParam:
     video_source = None
     output_dir = None
     DEBUG = False
+    FPS = None
 
 
 MDP = MotionDetectionParam
 
 input_queue = deque()
 display_queue = deque()
-object_list = list()
+object_list = deque()
 file_queue = Queue()
 
 event_stop_thread = threading.Event()
@@ -59,7 +62,7 @@ event_capture_ready.clear()
 class DisplayData:
     def __init__(self, index=0, timestamp=0):
         self.index = index
-        self.time = timestamp if timestamp > 0 else datetime.utcnow()
+        self.time = timestamp if timestamp > 0 else datetime.now()
         self.input_image = None
         self.model_image = None
         self.fg_image = None
@@ -69,6 +72,12 @@ class DisplayData:
 
 def capture_thread(video_source, in_queue, nskipframe, frame_scale):
     logging.info(f'Started')
+
+    logging.info(f'Estimating FPS')
+    hw_fps, fps = VideoUtil.estimate_fps(video_source)
+    logging.info(f'FPS : {hw_fps:.1f}(device), {fps:.1f}(estimated)')
+    MDP.FPS = fps
+
     logging.info(f'Connecting to device {video_source} ...')
     vcap = cv2.VideoCapture(video_source)
     logging.info('Connected.')
@@ -208,7 +217,7 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
     prev_frame = None
     is_first = True
     stability = 0
-    maxlen = 10
+    maxlen = 20
     dq = deque([], maxlen)
 
     # w = Config.VIDEO_WIDTH
@@ -245,7 +254,7 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
         # logging.info(f'dqsize: {len(dq)}/{maxlen}')
         if len(dq) == maxlen:
             v = np.var(dq)
-            if v < 40.0:
+            if v < 30.0:
                 stability += 1
             else:
                 stability = 0
@@ -259,11 +268,86 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
             display_queue.append(display_data)
 
 
-def track_object(obj_list):
-    # Tracking Analysis.ipynb 참조
-    pass
+def del_slice(q, s, e):
+    for i in range(e - 1, s - 1, -1):
+        del q[i]
 
-def monitor_thread(in_queue, obj_queue, mask):
+    return q
+
+
+def track_object(obj_queue):
+    # Tracking Analysis.ipynb 참조
+    object_status = [x[0] for x in obj_queue]
+    # logging.info(f'object_status : {object_status}')
+
+    status, T = ImageUtil.smooth(object_status, MDP.MOVING_WINDOW_SIZE)
+    n = len(status)
+    frame_margin = int(round(1. / T + 0.5))
+
+    idx0 = np.argwhere(status[::-1] < T)
+    tracking = np.sum(idx0[0:frame_margin]) == np.sum(range(frame_margin))
+    # logging.info(f'Track = {tracking}')
+
+    if not tracking:
+        return
+
+    s0 = None
+    e0 = None
+    # 1st step : 연속적으로 T 이상인 index를 찾자
+    idx = np.argwhere(status >= T)
+    if len(idx) == 0:
+        # del object_status[0:n-frame_margin]
+        del_slice(obj_queue, 0, n - frame_margin)
+        # print(f'연속적으로 T 이상인 구간이 없음 {object_status}')
+    else:
+        s0 = int(idx[0])
+        e0 = int(idx[-1])
+        # print(f'연속적으로 T 이상인 구간 {s0} {e0}')
+
+    s1 = None
+    e1 = None
+    if s0 is not None and e0 is not None:
+        # 2nd step : s0, e0 에서 frame_margin 만큼 확장하자
+        # 2-1 : s0-frame_margin >= 0   # s1 = s0-frame_margin
+        # 2-2 : s0-frame_margin < 0    # s1 = max(0, s0-frame_margin)
+        s1 = max(0, s0 - frame_margin)
+        # 2-3 : e0+frame_margin < n    # e1 = e0+frame_margin
+        if e0 + frame_margin < n:
+            e1 = e0 + frame_margin
+        elif n - s0 >= MDP.MAX_OBJECT_SLICE:
+            e1 = n
+        else:
+            # 2-4 ; e0+frame_margin >= n    # e1 = None (다음 state 가 1이될 가능성이 있으므로 기다린다)
+            e1 = None
+
+    object_slice = None
+    # step#3 : 0 부터 e1 까지 지운다
+    # if len([x is None for x in [s0, e0, s1, e1]])==0:
+    # print(f'{s0}, {e0}, {s1}, {e1}')
+    if [s0, e0, s1, e1].count(None) < 1:
+        object_slice = [obj_queue[i][1] for i in range(s1, e1)]
+        del_slice(obj_queue, 0, e1)
+        # object_status
+    # else:
+    # print(f'None included')
+
+    if object_slice:
+        # logging.info(f'To be write : { " ".join([str(x.index) for x in object_slice])}')
+        q = deque()
+        for x in object_slice:
+            make_overlay_image(x)
+            q.append(x.object_image)
+        filename = object_slice[0].time.replace(microsecond=0).isoformat() + '.mp4'
+        filename = FileUtil.make_valid_filename(filename)
+        if len(q) < 70:
+            filename = FileUtil.make_suffix_filename(filename, '-suspicious')
+        logging.info(f'Writing file : {len(q)} frames to {filename} with {MDP.FPS:.1f} fps.')
+        th = VideoFileWritingThread(name=f'VideoFileWritingThread',
+                                    args=(q, 'Object detected', filename, MDP.FPS))
+        th.start()
+
+
+def monitor_thread(in_queue, obj_list, mask):
     default_learning_rate = 0.01
 
     logging.info(f'Started')
@@ -279,12 +363,12 @@ def monitor_thread(in_queue, obj_queue, mask):
     # wait until event is set,
     while event_monitor.wait():
         if event_stop_thread.wait(0.0001):
-            obj_queue.put(None)
+            obj_list.append(None)
             break
 
         if not event_capture_ready.wait(10.0):
             logging.info(f'Waiting for capturing time out')
-            obj_queue.put(None)
+            obj_list.append(None)
             break
 
         try:
@@ -292,7 +376,7 @@ def monitor_thread(in_queue, obj_queue, mask):
         except IndexError:
             if retry_count == 5:
                 logging.info(f'No frame left in in_queue : tried {retry_count + 1} seconds')
-                obj_queue.put(None)
+                obj_list.append(None)
                 break
             retry_count += 1
             time.sleep(1)
@@ -341,27 +425,28 @@ def monitor_thread(in_queue, obj_queue, mask):
             # logging.info(f'Object detected')
 
             # METHOD1 : Using tracker
-            th = threading.Thread(None, tracking_thread, "tracking_thread",
-                                  args=(curr_image, in_queue, (x, y, w, h), obj_queue))
-            th.start()
-            event_tracking.set()
-            # pause me
-            event_monitor.clear()
+            # th = threading.Thread(None, tracking_thread, "tracking_thread",
+            #                       args=(curr_image, in_queue, (x, y, w, h), obj_list))
+            # th.start()
+            # event_tracking.set()
+            # # pause me
+            # event_monitor.clear()
 
             # METHOD2 : Just print out
-            # x = x + MDP.ROI[0]
-            # y = y + MDP.ROI[1]
-            # # logging.info(f'tracking: {x}, {y}, {w}, {h}')
-            #
-            # cv2.rectangle(display_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
-            # cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]),
-            #               (220, 220, 220), 2)
-            # cv2.drawContours(display_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
-            # cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {s}',
-            #             (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
+            x = x + MDP.ROI[0]
+            y = y + MDP.ROI[1]
+            # logging.info(f'tracking: {x}, {y}, {w}, {h}')
+
+            cv2.rectangle(display_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
+            cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]),
+                          (220, 220, 220), 2)
+            cv2.drawContours(display_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
+            cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {s}',
+                        (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
             # logging.info(f'Object size {display_data.index:04d}: {s}')
 
         object_list.append((1 if w is not None else 0, display_data))
+        track_object(object_list)
         display_queue.append(display_data)
 
     logging.info(f'Stopped')
@@ -468,13 +553,33 @@ def writing_display_image_thread(q, output_dir):
     logging.info(f'Finished')
 
 
+def make_overlay_image(display_data):
+    if display_data.object_image is None or display_data.fg_image is None or display_data.model_image is None:
+        return
+
+    margin = 20
+    line_width = 5
+    fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
+    model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
+    display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, fg_image_color,
+                                                                margin, margin,
+                                                                int(display_data.object_image.shape[
+                                                                        1] * 0.25))
+    cv2.rectangle(display_data.object_image, (margin, margin), (nw + margin, nh + margin), (255, 0, 255), line_width)
+    display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image,
+                                                                model_image_color, margin, nh + margin,
+                                                                int(display_data.object_image.shape[
+                                                                        1] * 0.25))
+    cv2.rectangle(display_data.object_image, (margin, nh + margin + 2*line_width), (nw + margin, 2 * (nh + margin) + line_width), (0, 255, 255), line_width)
+
+
 def main_thread():
     read_param(sys.argv)
 
     read_video_params(MDP.video_source)
 
     ImageUtil.create_image_window("source", MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT,
-                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 0.5)
+                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 1.0)
 
     mask = ImageLoader.read_image('data/mask1.png')
     mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
@@ -509,22 +614,9 @@ def main_thread():
                 cv2.imshow('Model', display_data.model_image)
             if display_data.fg_image is not None:
                 cv2.imshow('Difference', display_data.fg_image)
-            if display_data.object_image is not None and display_data.fg_image is not None and display_data.model_image is not None:
-                fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
-                model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
-                display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, fg_image_color,
-                                                                            0, 0,
-                                                                            int(display_data.object_image.shape[
-                                                                                    1] * 0.25))
-                cv2.rectangle(display_data.object_image, (0, 0), (nw, nh), (127, 127, 0), 3)
-                display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image,
-                                                                            model_image_color, 0,
-                                                                            nh,
-                                                                            int(display_data.object_image.shape[
-                                                                                    1] * 0.25))
-                cv2.rectangle(display_data.object_image, (0, nh + 3), (nw, 2 * nh + 3), (0, 127, 127), 3)
-                cv2.imshow('Detector', display_data.object_image)
-            elif display_data.object_image is not None:
+
+            make_overlay_image(display_data)
+            if display_data.object_image is not None:
                 cv2.imshow('Detector', display_data.object_image)
 
             if MDP.DEBUG:

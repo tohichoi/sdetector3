@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import threading
 import cv2
 import numpy as np
@@ -46,6 +47,20 @@ class FileUtil:
                 vcap_out.write(frame)
             vcap_out.release()
 
+    @staticmethod
+    def replace_extension(filename, rep_ext):
+        return os.path.splitext(filename)[0] + rep_ext
+
+    @staticmethod
+    def make_valid_filename(filename, replace_string=''):
+        s = re.sub('[-:]', replace_string, filename)
+        return s
+
+    @staticmethod
+    def make_suffix_filename(filename, suffix):
+        f, e = os.path.splitext(filename)
+        return f + suffix + e
+
 
 class VideoFileWritingThread(threading.Thread):
     def __init__(self, group=None, target=None, name=None,
@@ -55,13 +70,8 @@ class VideoFileWritingThread(threading.Thread):
         self.name = name
         self.q = args[0]
         self.info = args[1]
-        self.writedir = args[2]
-
-    def __estimate_fps(self):
-        q = self.q
-        fps = 1000. / np.mean(np.diff(np.array([v.createdtime * 1000 for v in q])))
-
-        return fps
+        self.filename = args[2]
+        self.fps = args[3]
 
     def run(self):
         n = len(self.q)
@@ -69,13 +79,13 @@ class VideoFileWritingThread(threading.Thread):
         h = self.q[0].shape[0]
 
         # logging.info(f'{threading.get_ident()} write_framebuf started : {self.q.qsize()}')
-        s = DateUtil.get_current_timestring()
-        fn = self.writedir + s + ".mp4"
+        # s = DateUtil.get_current_timestring()
+        fn = FileUtil.replace_extension(self.filename, ".mp4")
 
         logging.info(f'Writing {fn}')
-        fps = self.__estimate_fps()
+        # fps = self.__estimate_fps()
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        vcap_out = cv2.VideoWriter(fn, fourcc, fps, (w, h))
+        vcap_out = cv2.VideoWriter(fn, fourcc, self.fps, (w, h))
 
         while len(self.q) > 0:
             frame = self.q.popleft()
@@ -90,5 +100,5 @@ class VideoFileWritingThread(threading.Thread):
         # Config.tg_video_q.put_nowait(fn)
 
 
-if __name__ == 'dateutil':
+if __name__ == 'fileutil':
     create_logging()
