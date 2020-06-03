@@ -93,9 +93,9 @@ class VideoUtil:
         return w, h
 
     @staticmethod
-    def estimate_fps(video_source, num_frames=120):
+    def estimate_fps(video, num_frames=120):
         # Start default camera
-        video = cv2.VideoCapture(video_source)
+        # video = cv2.VideoCapture(video_source)
 
         cv2_fps = video.get(cv2.CAP_PROP_FPS)
 
@@ -116,7 +116,7 @@ class VideoUtil:
         fps = float(num_frames) / seconds
 
         # Release video
-        video.release()
+        # video.release()
 
         return fps, cv2_fps
 

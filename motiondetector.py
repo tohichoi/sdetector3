@@ -1,5 +1,5 @@
-import os
 import re
+import os
 import sys
 import threading
 import time
@@ -37,6 +37,7 @@ class MotionDetectionParam:
     video_source = None
     output_dir = None
     DEBUG = True
+    DEBUG_FRAME_TO_FILE = False
     FPS = None
 
 
@@ -73,14 +74,14 @@ class DisplayData:
 def capture_thread(video_source, in_queue, nskipframe, frame_scale):
     logging.info(f'Started')
 
-    logging.info(f'Estimating FPS')
-    hw_fps, fps = VideoUtil.estimate_fps(video_source)
-    logging.info(f'FPS : {hw_fps:.1f}(device), {fps:.1f}(estimated)')
-    MDP.FPS = fps
-
     logging.info(f'Connecting to device {video_source} ...')
     vcap = cv2.VideoCapture(video_source)
     logging.info('Connected.')
+
+    logging.info(f'Estimating FPS')
+    hw_fps, fps = VideoUtil.estimate_fps(vcap)
+    logging.info(f'FPS : {hw_fps:.1f}(device), {fps:.1f}(estimated)')
+    MDP.FPS = min(hw_fps, fps)
 
     w = int(vcap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -279,30 +280,26 @@ def track_object(obj_queue):
 
     # Tracking Analysis.ipynb 참조
     object_status = [x[0] for x in obj_queue]
-    # logging.info(f'object_status : {object_status}')
+    # if MDP.DEBUG:
+    #     logging.info(f'object_status : {"".join(str(x) for x in object_status)}')
 
     smoothed_object_status, T = ImageUtil.smooth(object_status, MDP.MOVING_WINDOW_SIZE)
     n = len(smoothed_object_status)
     frame_margin = int(round(1. / T + 0.5))
 
-    if MDP.DEBUG:
-        curr_index = obj_queue[-1][1].index
-        fig, ax = plt.subplots(1, 3, figsize=(20, 5))
-        fig.suptitle(f'frame-{curr_index:08d}')
-        n = len(object_status)
-        x = range(n)
-        ax[0].plot(x, smoothed_object_status)
-        ax[0].plot(x, np.ones(n) * T)
-        ax[0].plot(x, np.array(object_status), 'o')
-        ax[0].set_title('Input object sequence')
+    # if MDP.DEBUG:
+    #     curr_index = obj_queue[-1][1].index
+    #     filename = f'{MDP.output_dir}/{curr_index:08d}-tracking'
+
 
     idx0 = np.argwhere(smoothed_object_status[::-1] < T)
     tracking = np.sum(idx0[0:frame_margin]) == np.sum(range(frame_margin))
     # logging.info(f'Track = {tracking}')
 
     if not tracking:
-        if MDP.DEBUG:
-            plt.close(fig)
+        # if MDP.DEBUG:
+        #     # plt.close(fig)
+        #     fd.close()
         return
 
     s0 = None
@@ -347,13 +344,13 @@ def track_object(obj_queue):
         # object_status
     # else:
     # print(f'None included')
-    if MDP.DEBUG:
-        n = len(smoothed_object_status)
-        x = range(n)
-        ax[2].plot(x, smoothed_object_status)
-        ax[2].plot(x, np.ones(n) * T)
-        ax[2].plot(x, np.array(object_status), 'o')
-        ax[2].set_title('Remaining object sequence')
+    # if MDP.DEBUG:
+    #     n = len(smoothed_object_status)
+    #     x = range(n)
+    #     ax[2].plot(x, smoothed_object_status)
+    #     ax[2].plot(x, np.ones(n) * T)
+    #     ax[2].plot(x, np.array(object_status), 'o')
+    #     ax[2].set_title('Remaining object sequence')
         # print(f'object_status : {object_status}')
 
     if object_slice:
@@ -372,21 +369,24 @@ def track_object(obj_queue):
         th.start()
 
         if MDP.DEBUG:
-            x = range(s1, e1)
-            n = len(smoothed_object_status[s1:e1])
-            ax[1].set_title('Sliced object sequence')
-            ax[1].plot(x, smoothed_object_status[s1:e1])
-            ax[1].plot(x, np.ones(n)*T)
-            ax[1].plot(x, np.array(object_status[s1:e1]), 'o')
-            # print(f'object_status : {object_status}')
-            fig.savefig(f'{MDP.output_dir}/{curr_index:08d}-tracking.png')
+            logging.info(f'object_slice : \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status[s1:e1])}]')
 
-    if MDP.DEBUG:
-        plt.close(fig)
+    #     if MDP.DEBUG:
+    #         x = range(s1, e1)
+    #         n = len(smoothed_object_status[s1:e1])
+    #         ax[1].set_title('Sliced object sequence')
+    #         ax[1].plot(x, smoothed_object_status[s1:e1])
+    #         ax[1].plot(x, np.ones(n)*T)
+    #         ax[1].plot(x, np.array(object_status[s1:e1]), 'o')
+    #         # print(f'object_status : {object_status}')
+    #         fig.savefig(f'{MDP.output_dir}/{curr_index:08d-tracking.png')
+    #
+    # if MDP.DEBUG:
+    #     plt.close(fig)
 
 
 def monitor_thread(in_queue, obj_list, mask):
-    default_learning_rate = 0.01
+    default_learning_rate = 0.1
 
     logging.info(f'Started')
     logging.info(f'output dir : {MDP.output_dir}')
@@ -404,7 +404,7 @@ def monitor_thread(in_queue, obj_list, mask):
             obj_list.append(None)
             break
 
-        if not event_capture_ready.wait(10.0):
+        if not event_capture_ready.wait(60.0):
             logging.info(f'Waiting for capturing time out')
             obj_list.append(None)
             break
@@ -453,7 +453,7 @@ def monitor_thread(in_queue, obj_list, mask):
 
         display_data.model_image = fgbg.getBackgroundImage()
         display_data.fg_image = fgmask
-        display_data.object_image = display_data.input_image
+        display_data.object_image = copy.copy(display_data.input_image)
 
         # TODO: remove debugging code
         # obj_size=(0, ImageUtil.width(ROI)*ImageUtil.height(ROI))
@@ -516,11 +516,11 @@ def read_param(argv):
     MDP.video_source = argv[1]
     if not os.path.exists(MDP.video_source):
         # logging.info(f'File not found : {MDP.video_source}')
-        MDP.output_dir = f'MotionDetector-{DateUtil.get_current_timestring()}'
+        MDP.output_dir = f'data/MotionDetector-{DateUtil.get_current_timestring()}'
     else:
         MDP.output_dir = os.path.join(os.path.dirname(MDP.video_source),
                                       os.path.splitext(os.path.basename(MDP.video_source))[0])
-    if MDP.DEBUG:
+    if MDP.DEBUG_FRAME_TO_FILE:
         try:
             plt.ioff()
             os.mkdir(MDP.output_dir)
@@ -596,20 +596,20 @@ def make_overlay_image(display_data):
     if display_data.object_image is None or display_data.fg_image is None or display_data.model_image is None:
         return
 
-    margin = 20
+    dx, dy = (20, 20)
     line_width = 5
     fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
     model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
-    display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image, fg_image_color,
-                                                                margin, margin,
-                                                                int(display_data.object_image.shape[
-                                                                        1] * 0.25))
-    cv2.rectangle(display_data.object_image, (margin, margin), (nw + margin, nh + margin), (255, 0, 255), line_width)
-    display_data.object_image, nw, nh = ImageUtil.overlay_image(display_data.object_image,
-                                                                model_image_color, margin, nh + margin,
-                                                                int(display_data.object_image.shape[
-                                                                        1] * 0.25))
-    cv2.rectangle(display_data.object_image, (margin, nh + margin + 2*line_width), (nw + margin, 2 * (nh + margin) + line_width), (0, 255, 255), line_width)
+    display_data.object_image, nw, nh = ImageUtil.overlay_image(copy.copy(display_data.object_image),
+                                                                fg_image_color,
+                                                                dx, dy,
+                                                                int(display_data.object_image.shape[1] * 0.25))
+    cv2.rectangle(display_data.object_image, (dx, dy), (dx+nw, dy+nh), (255, 0, 255), line_width)
+    display_data.object_image, nw, nh = ImageUtil.overlay_image(copy.copy(display_data.object_image),
+                                                                model_image_color,
+                                                                dx, nh + 2*dy,
+                                                                int(display_data.object_image.shape[1] * 0.25))
+    cv2.rectangle(display_data.object_image, (dx, nh + 2*dy), (nw + dx, 2*(nh + dy)), (0, 255, 255), line_width)
 
 
 def main_thread():
@@ -659,7 +659,7 @@ def main_thread():
             if display_data.object_image is not None:
                 cv2.imshow('Detector', display_data.object_image)
 
-            if MDP.DEBUG:
+            if MDP.DEBUG_FRAME_TO_FILE:
                 file_queue.put(display_data)
 
         if cv2.waitKey(50) == ord('q'):
