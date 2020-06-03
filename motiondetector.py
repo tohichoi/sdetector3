@@ -6,7 +6,7 @@ import time
 import copy
 from datetime import datetime
 from queue import Queue
-
+import json
 import imutils
 import numpy as np
 import cv2
@@ -36,7 +36,7 @@ class MotionDetectionParam:
     VIDEO_HEIGHT = -1
     video_source = None
     output_dir = None
-    DEBUG = False
+    DEBUG = True
     FPS = None
 
 
@@ -276,25 +276,39 @@ def del_slice(q, s, e):
 
 
 def track_object(obj_queue):
+
     # Tracking Analysis.ipynb 참조
     object_status = [x[0] for x in obj_queue]
     # logging.info(f'object_status : {object_status}')
 
-    status, T = ImageUtil.smooth(object_status, MDP.MOVING_WINDOW_SIZE)
-    n = len(status)
+    smoothed_object_status, T = ImageUtil.smooth(object_status, MDP.MOVING_WINDOW_SIZE)
+    n = len(smoothed_object_status)
     frame_margin = int(round(1. / T + 0.5))
 
-    idx0 = np.argwhere(status[::-1] < T)
+    if MDP.DEBUG:
+        curr_index = obj_queue[-1][1].index
+        fig, ax = plt.subplots(1, 3, figsize=(20, 5))
+        fig.suptitle(f'frame-{curr_index:08d}')
+        n = len(object_status)
+        x = range(n)
+        ax[0].plot(x, smoothed_object_status)
+        ax[0].plot(x, np.ones(n) * T)
+        ax[0].plot(x, np.array(object_status), 'o')
+        ax[0].set_title('Input object sequence')
+
+    idx0 = np.argwhere(smoothed_object_status[::-1] < T)
     tracking = np.sum(idx0[0:frame_margin]) == np.sum(range(frame_margin))
     # logging.info(f'Track = {tracking}')
 
     if not tracking:
+        if MDP.DEBUG:
+            plt.close(fig)
         return
 
     s0 = None
     e0 = None
     # 1st step : 연속적으로 T 이상인 index를 찾자
-    idx = np.argwhere(status >= T)
+    idx = np.argwhere(smoothed_object_status >= T)
     if len(idx) == 0:
         # del object_status[0:n-frame_margin]
         del_slice(obj_queue, 0, n - frame_margin)
@@ -327,9 +341,20 @@ def track_object(obj_queue):
     if [s0, e0, s1, e1].count(None) < 1:
         object_slice = [obj_queue[i][1] for i in range(s1, e1)]
         del_slice(obj_queue, 0, e1)
+        # del object_status[:e1]
+        # smoothed_object_status = np.delete(smoothed_object_status, np.s_[:e1])
+
         # object_status
     # else:
     # print(f'None included')
+    if MDP.DEBUG:
+        n = len(smoothed_object_status)
+        x = range(n)
+        ax[2].plot(x, smoothed_object_status)
+        ax[2].plot(x, np.ones(n) * T)
+        ax[2].plot(x, np.array(object_status), 'o')
+        ax[2].set_title('Remaining object sequence')
+        # print(f'object_status : {object_status}')
 
     if object_slice:
         # logging.info(f'To be write : { " ".join([str(x.index) for x in object_slice])}')
@@ -345,6 +370,19 @@ def track_object(obj_queue):
         th = VideoFileWritingThread(name=f'VideoFileWritingThread',
                                     args=(q, 'Object detected', filename, MDP.FPS))
         th.start()
+
+        if MDP.DEBUG:
+            x = range(s1, e1)
+            n = len(smoothed_object_status[s1:e1])
+            ax[1].set_title('Sliced object sequence')
+            ax[1].plot(x, smoothed_object_status[s1:e1])
+            ax[1].plot(x, np.ones(n)*T)
+            ax[1].plot(x, np.array(object_status[s1:e1]), 'o')
+            # print(f'object_status : {object_status}')
+            fig.savefig(f'{MDP.output_dir}/{curr_index:08d}-tracking.png')
+
+    if MDP.DEBUG:
+        plt.close(fig)
 
 
 def monitor_thread(in_queue, obj_list, mask):
@@ -484,6 +522,7 @@ def read_param(argv):
                                       os.path.splitext(os.path.basename(MDP.video_source))[0])
     if MDP.DEBUG:
         try:
+            plt.ioff()
             os.mkdir(MDP.output_dir)
         except FileExistsError:
             pass
@@ -574,12 +613,13 @@ def make_overlay_image(display_data):
 
 
 def main_thread():
+
     read_param(sys.argv)
 
     read_video_params(MDP.video_source)
 
     ImageUtil.create_image_window("source", MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT,
-                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 1.0)
+                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 0.5)
 
     mask = ImageLoader.read_image('data/mask1.png')
     mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
