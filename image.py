@@ -221,6 +221,15 @@ class ImageUtil:
 
         return status, T
 
+    @staticmethod
+    def put_text(image, text, x, y, fg_color, bg_color, scale, thickness):
+        m = 0
+        face = cv2.FONT_HERSHEY_SCRIPT_SIMPLEX
+        sz = cv2.getTextSize(text, face, scale, thickness)
+        w = sz[0][1]
+        h = sz[0][1]
+        # cv2.rectangle(image, (max(0, x-m), max(0, y-m)), (x+w+m, y+h+m), bg_color, thickness=cv2.FILLED)
+        cv2.putText(image, text, (x, y), face, scale, fg_color, thickness)
 
 class FeatureExtractor:
     def __init__(self, image, roi, filename=None):

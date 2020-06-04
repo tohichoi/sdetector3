@@ -23,7 +23,7 @@ class MotionDetectionParam:
     FRAME_SCALE = 1.0
     # Contour area (WIDTH X HEIGHT)
     OBJECT_SIZE = (100 * 100, 200 * 300)
-    NUM_SKIP_FRAME = 0
+    NUM_SKIP_FRAME = 1
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
     MAX_OBJECT_SLICE = 200
@@ -124,9 +124,15 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
         if frame_scale != 1:
             frame = imutils.resize(frame, int(w * frame_scale))
 
+        # cv2.putText(frame, f'{frame_index-1}', (0, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0))
+        ImageUtil.put_text(frame, f'{frame_index-1}', frame.shape[1]-150, frame.shape[0] - 50,
+                           (0,0,0), (0xff, 0xf9, 0xc4), 1.5, 5)
+
         display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
         in_queue.append(display_data)
+
+        # time.sleep(hw_fps / 1000)
 
     vcap.release()
     logging.info(f'Stopped')
@@ -222,11 +228,23 @@ def find_object(fgmask, object_size_threshold):
 
     # method#1 : contour bounding box
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+    CX=[]
+    CY=[]
+    for c in contours:
+        M = cv2.moments(c)
+        cx = np.NaN if M['m00'] == 0 else int(M['m10'] / M['m00'])
+        cy = np.NaN if M['m00'] == 0 else int(M['m01'] / M['m00'])
+        CX.append(cx)
+        CY.append(cy)
+
     x, y, w, h = cv2.boundingRect(contours[0])
     s = cv2.contourArea(contours[0])
     # logging.info(f'contourArea : {s}')
     if object_size_threshold[1] > s >= object_size_threshold[0]:
         # logging.info(f'contourArea : {s}, min: {object_size_threshold[0]}, max: {object_size_threshold[1]}')
+        logging.info(f'CX={CX}')
+        logging.info(f'CY={CY}')
         return x, y, w, h, s, contours[0]
 
     return [None] * 6
@@ -246,14 +264,17 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
     widx = np.random.randint(w, size=nsamples)
     hidx = np.random.randint(h, size=nsamples)
 
+    last_frame_number=0
     retry_count = 0
     # nskip=1
     while True:
         try:
             display_data = q.popleft()
+            last_frame_number = display_data.index
+            retry_count = 0
         except IndexError:
-            logging.info(f'No frame left in in_queue : retrying {retry_count + 1}')
-            if retry_count == 5:
+            if retry_count == 10:
+                logging.info(f'No frame left in in_queue (last frame : {last_frame_number}) : retrying {retry_count + 1}')
                 break
             retry_count += 1
             time.sleep(0.5)
@@ -403,7 +424,7 @@ def track_object_presence(obj_queue):
 
 
 def monitor_thread(in_queue, obj_list, mask):
-    default_learning_rate = 0.1
+    default_learning_rate = 0.5
 
     logging.info(f'Started')
     logging.info(f'output dir : {MDP.output_dir}')
@@ -459,7 +480,7 @@ def monitor_thread(in_queue, obj_list, mask):
         scene_changed, similarity = detect_scene_change(prev_image, curr_image, mask)
         if scene_changed:
             logging.info(f'scene_changed {display_data.index:04d}: {similarity}')
-            wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0], None)
+            wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0], 'source')
             learning_rate = 1
             continue
 
@@ -597,6 +618,7 @@ def main_thread():
 
     read_param(sys.argv)
 
+    logging.info(f'Reading video parameters from {MDP.video_source}')
     read_video_params(MDP.video_source)
 
     ImageUtil.create_image_window("source", MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT,
