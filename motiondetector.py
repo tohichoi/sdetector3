@@ -60,6 +60,24 @@ event_capture_ready = threading.Event()
 event_capture_ready.clear()
 
 
+# millisec
+def clock():
+    return cv2.getTickCount() / cv2.getTickFrequency()
+
+
+# from opencv sample
+class StatValue:
+    def __init__(self, smooth_coef = 0.5):
+        self.value = None
+        self.smooth_coef = smooth_coef
+    def update(self, v):
+        if self.value is None:
+            self.value = v
+        else:
+            c = self.smooth_coef
+            self.value = c * self.value + (1.0-c) * v
+
+
 class DisplayData:
     def __init__(self, index=0, timestamp=0):
         self.index = index
@@ -276,7 +294,7 @@ def del_slice(q, s, e):
     return q
 
 
-def track_object(obj_queue):
+def track_object_presence(obj_queue):
 
     # Tracking Analysis.ipynb 참조
     object_status = [x[0] for x in obj_queue]
@@ -290,7 +308,6 @@ def track_object(obj_queue):
     # if MDP.DEBUG:
     #     curr_index = obj_queue[-1][1].index
     #     filename = f'{MDP.output_dir}/{curr_index:08d}-tracking'
-
 
     idx0 = np.argwhere(smoothed_object_status[::-1] < T)
     tracking = np.sum(idx0[0:frame_margin]) == np.sum(range(frame_margin))
@@ -399,6 +416,7 @@ def monitor_thread(in_queue, obj_list, mask):
     prev_image = None
     curr_image = None
     # wait until event is set,
+    latency = 0
     while event_monitor.wait():
         if event_stop_thread.wait(0.0001):
             obj_list.append(None)
@@ -411,9 +429,12 @@ def monitor_thread(in_queue, obj_list, mask):
 
         try:
             display_data = in_queue.popleft()
+            latency = (datetime.now() - display_data.time).seconds
+            if display_data.index % 100 == 0:
+                logging.info(f'Monitoring latency : {latency:.1f}')
         except IndexError:
-            if retry_count == 5:
-                logging.info(f'No frame left in in_queue : tried {retry_count + 1} seconds')
+            if retry_count == 10:
+                logging.info(f'No frame left in in_queue : tried {retry_count} times')
                 obj_list.append(None)
                 break
             retry_count += 1
@@ -484,7 +505,7 @@ def monitor_thread(in_queue, obj_list, mask):
             # logging.info(f'Object size {display_data.index:04d}: {s}')
 
         object_list.append((1 if w is not None else 0, display_data))
-        track_object(object_list)
+        track_object_presence(object_list)
         display_queue.append(display_data)
 
     logging.info(f'Stopped')
@@ -529,46 +550,6 @@ def read_param(argv):
         finally:
             if not os.path.exists(MDP.output_dir):
                 raise RuntimeError(f"Cannot create directory : {MDP.output_dir}")
-
-
-def object_writing_thread(q, output_dir):
-    logging.info(f'Started')
-    while True:
-        # don't need to rush for writing
-        if event_stop_thread.wait(1.0):
-            break
-
-        # caller 에서 저장할 이미지를 큐에 모두 put 한 다음 writing 을 해야하기 때문에
-        # 이벤트를 기다린다
-        event_object_writing.wait()
-
-        fn = None
-        vcap_out = None
-        FPS = 8
-
-        while True:
-            object_data = q.get()
-            # producer should put 'None' to queue for marking end of image
-            if object_data is None:
-                break
-
-            if not fn:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                vcap_out = cv2.VideoWriter(fn, fourcc, FPS, (MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT))
-
-                # logging.info(f'{threading.get_ident()} write_framebuf started : {self.q.qsize()}')
-                s = object_data.time.replace(microsecond=0).isoformat()
-                s = re.sub('[-:]', '', s)
-                fn = output_dir + s + ".mp4"
-
-                logging.info(f'Writing {fn}')
-
-            vcap_out.write(object_data.object_image)
-
-        event_object_writing.clear()
-        vcap_out.release()
-
-    logging.info(f'Finished')
 
 
 def writing_display_image_thread(q, output_dir):
@@ -627,7 +608,7 @@ def main_thread():
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
                                   args=(input_queue, object_list, mask))
-    th_writing = threading.Thread(None, writing_display_image_thread, "display_image_writing_thread",
+    th_display = threading.Thread(None, writing_display_image_thread, "display_image_writing_thread",
                                   args=(file_queue, MDP.output_dir))
 
     # start capture
@@ -637,7 +618,7 @@ def main_thread():
     event_monitor.set()
     th_monitor.start()
 
-    th_writing.start()
+    th_display.start()
 
     while True:
         q_len = len(display_queue)
