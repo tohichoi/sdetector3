@@ -2,8 +2,12 @@ import logging
 import os
 import re
 import threading
+import time
+
 import cv2
 import numpy as np
+
+from image import ImageUtil
 from mydateutil import DateUtil
 
 
@@ -89,7 +93,10 @@ class VideoFileWritingThread(threading.Thread):
 
         while len(self.q) > 0:
             frame = self.q.popleft()
+            ImageUtil.put_text(frame, self.info, frame.shape[1] - 150, frame.shape[0] - 120,
+                               (0, 0, 0), (0xff, 0xcd, 0xd2), 1, 2)
             vcap_out.write(frame)
+            time.sleep(0.05)
             # logging.info(f'{threading.get_ident()} : {self.q.qsize()}')
 
         vcap_out.release()

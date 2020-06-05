@@ -17,12 +17,13 @@ import logging
 from fileutil import create_logging, VideoFileWritingThread, FileUtil
 from mydateutil import DateUtil
 from collections import deque
+from telegram import Bot
 
 
 class MotionDetectionParam:
     FRAME_SCALE = 1.0
     # Contour area (WIDTH X HEIGHT)
-    OBJECT_SIZE = (100 * 100, 200 * 300)
+    OBJECT_SIZE = (100 * 100, 200 * 400)
     NUM_SKIP_FRAME = 1
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
@@ -39,9 +40,19 @@ class MotionDetectionParam:
     DEBUG = True
     DEBUG_FRAME_TO_FILE = False
     FPS = None
+    show_window_flag = [True, True, False, False, False]
+    send_video = True
+
+
+class TelegramData:
+    video_q = Queue()
+    bot = None
+    CHAT_ID = None
+    TOKEN = None
 
 
 MDP = MotionDetectionParam
+TD = TelegramData
 
 input_queue = deque()
 display_queue = deque()
@@ -89,6 +100,36 @@ class DisplayData:
         self.roi_image = None
 
 
+def send_video_thread(writing_thread_handle, filename, logprob):
+
+    writing_thread_handle.join(30)
+    if writing_thread_handle.is_alive():
+        logging.info(f'{writing_thread_handle.name} is still running. Aborting message sending.')
+        return
+
+    logging.info('Started')
+    fn = os.path.basename(filename)
+    logger.info(f'{filename}')
+    # d=datetime.datetime.fromtimestamp(v.createdtime, datetime.timezone.utc)
+    msg = f'순심이 확률(log): {logprob:.2f}'
+    TelegramData.bot.send_message(chat_id=TelegramData.CHAT_ID, text=msg)
+    TelegramData.bot.send_video(chat_id=TelegramData.CHAT_ID,
+                                caption=fn,
+                                video=open(filename, 'rb'),
+                                timeout=120)
+    logging.info('Finished')
+
+
+def send_video(writing_thread_handle, filename, logprob):
+    # q=Config.tg_video_q
+    # while not q.empty():
+    #     v=q.get()
+    th = threading.Thread(None, send_video_thread, "Send_video_thread",
+                          (writing_thread_handle, filename, logprob))
+
+    th.start()
+
+
 def capture_thread(video_source, in_queue, nskipframe, frame_scale):
     logging.info(f'Started')
 
@@ -118,7 +159,7 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
             break
 
         frame_index += 1
-        if nskipframe > 0 and frame_index % nskipframe != 0:
+        if nskipframe > 0 and frame_index % (nskipframe+1) != 0:
             continue
 
         if frame_scale != 1:
@@ -126,7 +167,7 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
 
         # cv2.putText(frame, f'{frame_index-1}', (0, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0))
         ImageUtil.put_text(frame, f'{frame_index-1}', frame.shape[1]-150, frame.shape[0] - 50,
-                           (0,0,0), (0xff, 0xf9, 0xc4), 1.5, 5)
+                           (0,0,0), (0xaa, 0xaa, 0xaa), 1, 2)
 
         display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
@@ -175,6 +216,7 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
         try:
             display_data = in_queue.popleft()
             frame = display_data.input_image
+            retry_count = 0
         except IndexError:
             logging.info(f'No frame left in in_queue : retrying {retry_count + 1}')
             if retry_count == 5:
@@ -229,22 +271,24 @@ def find_object(fgmask, object_size_threshold):
     # method#1 : contour bounding box
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
-    CX=[]
-    CY=[]
-    for c in contours:
-        M = cv2.moments(c)
-        cx = np.NaN if M['m00'] == 0 else int(M['m10'] / M['m00'])
-        cy = np.NaN if M['m00'] == 0 else int(M['m01'] / M['m00'])
-        CX.append(cx)
-        CY.append(cy)
+    # center of mass feature
+    # CX=[]
+    # CY=[]
+    # for c in contours:
+    #     M = cv2.moments(c)
+    #     cx = np.NaN if M['m00'] == 0 else int(M['m10'] / M['m00'])
+    #     cy = np.NaN if M['m00'] == 0 else int(M['m01'] / M['m00'])
+    #     CX.append(cx)
+    #     CY.append(cy)
 
     x, y, w, h = cv2.boundingRect(contours[0])
     s = cv2.contourArea(contours[0])
     # logging.info(f'contourArea : {s}')
     if object_size_threshold[1] > s >= object_size_threshold[0]:
         # logging.info(f'contourArea : {s}, min: {object_size_threshold[0]}, max: {object_size_threshold[1]}')
-        logging.info(f'CX={CX}')
-        logging.info(f'CY={CY}')
+        # center of mass feature
+        # logging.info(f'CX={CX}')
+        # logging.info(f'CY={CY}')
         return x, y, w, h, s, contours[0]
 
     return [None] * 6
@@ -313,6 +357,38 @@ def del_slice(q, s, e):
         del q[i]
 
     return q
+
+
+def get_object_slice_prob(smoothed_object_status):
+
+    # 0 이상인 값을 추출한다
+    s = smoothed_object_status
+
+    # empty 리스트이면 prob = 0.0
+    return np.sum(np.log(s[np.where(s > 0)[0]]))
+
+
+def write_object_slice(obj_queue, smoothed_object_status):
+    q = deque()
+    for x in obj_queue:
+        make_overlay_image(x)
+        q.append(x.object_image)
+    filename = obj_queue[0].time.replace(microsecond=0).isoformat() + '.mp4'
+    filename = FileUtil.make_valid_filename(filename)
+    if len(q) < 70:
+        filename = FileUtil.make_suffix_filename(filename, '-suspicious')
+    filepath = MDP.output_dir + filename
+    logging.info(f'Writing file from {obj_queue[0].index}: {len(q)} frames to {filepath} with {MDP.FPS:.1f} fps.')
+    logprob = get_object_slice_prob(smoothed_object_status)
+    th = VideoFileWritingThread(name=f'VideoFileWritingThread',
+                                args=(q, f'{logprob:.2f}', filepath, MDP.FPS))
+    th.start()
+
+    if MDP.DEBUG:
+        logging.info(f'object_slice (log prob = {logprob:.2f}): \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status)}]')
+
+    if MDP.send_video:
+        send_video(th, filepath, logprob)
 
 
 def track_object_presence(obj_queue):
@@ -393,22 +469,7 @@ def track_object_presence(obj_queue):
 
     if object_slice:
         # logging.info(f'To be write : { " ".join([str(x.index) for x in object_slice])}')
-        q = deque()
-        for x in object_slice:
-            make_overlay_image(x)
-            q.append(x.object_image)
-        filename = object_slice[0].time.replace(microsecond=0).isoformat() + '.mp4'
-        filename = FileUtil.make_valid_filename(filename)
-        if len(q) < 70:
-            filename = FileUtil.make_suffix_filename(filename, '-suspicious')
-        logging.info(f'Writing file : {len(q)} frames to {filename} with {MDP.FPS:.1f} fps.')
-        th = VideoFileWritingThread(name=f'VideoFileWritingThread',
-                                    args=(q, 'Object detected', filename, MDP.FPS))
-        th.start()
-
-        if MDP.DEBUG:
-            logging.info(f'object_slice : \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status[s1:e1])}]')
-
+        write_object_slice(object_slice, smoothed_object_status[s1:e1])
     #     if MDP.DEBUG:
     #         x = range(s1, e1)
     #         n = len(smoothed_object_status[s1:e1])
@@ -424,7 +485,7 @@ def track_object_presence(obj_queue):
 
 
 def monitor_thread(in_queue, obj_list, mask):
-    default_learning_rate = 0.5
+    default_learning_rate = 0.005
 
     logging.info(f'Started')
     logging.info(f'output dir : {MDP.output_dir}')
@@ -481,6 +542,8 @@ def monitor_thread(in_queue, obj_list, mask):
         if scene_changed:
             logging.info(f'scene_changed {display_data.index:04d}: {similarity}')
             wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0], 'source')
+            object_list.clear()
+            logging.info(f'Object list is cleared')
             learning_rate = 1
             continue
 
@@ -488,6 +551,7 @@ def monitor_thread(in_queue, obj_list, mask):
             logging.info(f'Re-learning scene from now {display_data.index:04d}')
             fgbg.apply(curr_image, None, 1)
             learning_rate = default_learning_rate
+            fgbg.setBackgroundRatio(learning_rate)
 
         fgmask = fgbg.apply(curr_image, None, learning_rate)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -558,19 +622,26 @@ def read_param(argv):
     MDP.video_source = argv[1]
     if not os.path.exists(MDP.video_source):
         # logging.info(f'File not found : {MDP.video_source}')
-        MDP.output_dir = f'data/MotionDetector-{DateUtil.get_current_timestring()}'
+        MDP.output_dir = f'data/MotionDetector-{DateUtil.get_current_timestring()}/'
     else:
         MDP.output_dir = os.path.join(os.path.dirname(MDP.video_source),
-                                      os.path.splitext(os.path.basename(MDP.video_source))[0])
-    if MDP.DEBUG_FRAME_TO_FILE:
-        try:
-            plt.ioff()
-            os.mkdir(MDP.output_dir)
-        except FileExistsError:
-            pass
-        finally:
-            if not os.path.exists(MDP.output_dir):
-                raise RuntimeError(f"Cannot create directory : {MDP.output_dir}")
+                                      os.path.splitext(os.path.basename(MDP.video_source))[0]) + '/'
+    # if MDP.DEBUG_FRAME_TO_FILE:
+    try:
+        plt.ioff()
+        os.mkdir(MDP.output_dir)
+    except FileExistsError:
+        pass
+    finally:
+        if not os.path.exists(MDP.output_dir):
+            raise RuntimeError(f"Cannot create directory : {MDP.output_dir}")
+
+    if os.path.exists('telegram.json'):
+        with open('telegram.json') as fd:
+            cf = json.load(fd)
+            TelegramData.CHAT_ID = cf['bot_chatid']
+            TelegramData.TOKEN = cf['bot_token']
+            TelegramData.bot = Bot(TelegramData.TOKEN)
 
 
 def writing_display_image_thread(q, output_dir):
@@ -599,19 +670,22 @@ def make_overlay_image(display_data):
         return
 
     dx, dy = (20, 20)
-    line_width = 5
-    fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
-    model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
+    line_width = 2
+    # fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
+    fg_image_color = cv2.applyColorMap(display_data.fg_image, cv2.COLORMAP_BONE)
+
+    # model_image_color = cv2.cvtColor(display_data.model_image, cv2.COLOR_GRAY2BGR)
+    model_image_color = cv2.applyColorMap(display_data.model_image, cv2.COLORMAP_RAINBOW)
     display_data.object_image, nw, nh = ImageUtil.overlay_image(copy.copy(display_data.object_image),
                                                                 fg_image_color,
                                                                 dx, dy,
                                                                 int(display_data.object_image.shape[1] * 0.25))
-    cv2.rectangle(display_data.object_image, (dx, dy), (dx+nw, dy+nh), (255, 0, 255), line_width)
+    cv2.rectangle(display_data.object_image, (dx, dy), (dx+nw, dy+nh), (64, 64, 64), line_width)
     display_data.object_image, nw, nh = ImageUtil.overlay_image(copy.copy(display_data.object_image),
                                                                 model_image_color,
                                                                 dx, nh + 2*dy,
                                                                 int(display_data.object_image.shape[1] * 0.25))
-    cv2.rectangle(display_data.object_image, (dx, nh + 2*dy), (nw + dx, 2*(nh + dy)), (0, 255, 255), line_width)
+    cv2.rectangle(display_data.object_image, (dx, nh + 2*dy), (nw + dx, 2*(nh + dy)), (64, 64, 64), line_width)
 
 
 def main_thread():
@@ -622,7 +696,7 @@ def main_thread():
     read_video_params(MDP.video_source)
 
     ImageUtil.create_image_window("source", MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT,
-                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 0.5)
+                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 1, show_flag=MDP.show_window_flag)
 
     mask = ImageLoader.read_image('data/mask1.png')
     mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
@@ -653,9 +727,9 @@ def main_thread():
             # logging.info(f'Updating image')
             if display_data.input_image is not None:
                 cv2.imshow('source', display_data.input_image)
-            if display_data.model_image is not None:
+            if display_data.model_image is not None and MDP.show_window_flag[2]:
                 cv2.imshow('Model', display_data.model_image)
-            if display_data.fg_image is not None:
+            if display_data.fg_image is not None and MDP.show_window_flag[3]:
                 cv2.imshow('Difference', display_data.fg_image)
 
             make_overlay_image(display_data)

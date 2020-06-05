@@ -179,7 +179,7 @@ class ImageUtil:
         return newimage, nw, nh
 
     @staticmethod
-    def create_image_window(source, w, h, rw, rh, s):
+    def create_image_window(source, w, h, rw, rh, s, show_flag=[True, True, False, False, False]):
         scale = s
         wm, hm = (5, 35)
         nw, nh = (int(w * scale), int(h * scale))
@@ -193,20 +193,23 @@ class ImageUtil:
         cv2.resizeWindow(wn[0], nw, nh)
 
         cv2.namedWindow(wn[1], flags)
-        cv2.moveWindow(wn[1], nw + wm, 0)
+        cv2.moveWindow(wn[1], 0, hm + nh)
         cv2.resizeWindow(wn[1], nw, nh)
 
-        cv2.namedWindow(wn[2], flags)
-        cv2.moveWindow(wn[2], 0, nh + hm)
-        cv2.resizeWindow(wn[2], rnw, rnh)
+        if show_flag[2]:
+            cv2.namedWindow(wn[2], flags)
+            cv2.moveWindow(wn[2], 0, nh + hm)
+            cv2.resizeWindow(wn[2], rnw, rnh)
 
-        cv2.namedWindow(wn[3], flags)
-        cv2.moveWindow(wn[3], rnw + wm, nh + hm)
-        cv2.resizeWindow(wn[3], rnw, rnh)
+        if show_flag[3]:
+            cv2.namedWindow(wn[3], flags)
+            cv2.moveWindow(wn[3], rnw + wm, nh + hm)
+            cv2.resizeWindow(wn[3], rnw, rnh)
 
-        cv2.namedWindow(wn[4], flags)
-        cv2.moveWindow(wn[4], 2 * (rnw + wm), nh + hm)
-        cv2.resizeWindow(wn[4], rnw, rnh)
+        if show_flag[4]:
+            cv2.namedWindow(wn[4], flags)
+            cv2.moveWindow(wn[4], 2 * (rnw + wm), nh + hm)
+            cv2.resizeWindow(wn[4], rnw, rnh)
 
     # s: 1d signal
     @staticmethod
@@ -223,12 +226,12 @@ class ImageUtil:
 
     @staticmethod
     def put_text(image, text, x, y, fg_color, bg_color, scale, thickness):
-        m = 0
-        face = cv2.FONT_HERSHEY_SCRIPT_SIMPLEX
+        m = 10
+        face = cv2.FONT_HERSHEY_SIMPLEX
         sz = cv2.getTextSize(text, face, scale, thickness)
-        w = sz[0][1]
+        w = sz[0][0]
         h = sz[0][1]
-        # cv2.rectangle(image, (max(0, x-m), max(0, y-m)), (x+w+m, y+h+m), bg_color, thickness=cv2.FILLED)
+        cv2.rectangle(image, (max(0, x-m), max(0, y-h-m)), (x+w+m, y+m), bg_color, thickness=cv2.FILLED)
         cv2.putText(image, text, (x, y), face, scale, fg_color, thickness)
 
 class FeatureExtractor:
