@@ -29,7 +29,7 @@ class MotionDetectionParam:
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
     MAX_OBJECT_SLICE = 200
-    MOVING_WINDOW_SIZE = 20
+    MOVING_WINDOW_SIZE = 35
     VIDEO_ORG_WIDTH = -1
     VIDEO_ORG_HEIGHT = -1
     # scaled width
@@ -206,7 +206,7 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
         display_data.input_image = frame
         in_queue.append(display_data)
 
-        # time.sleep(hw_fps / 1000)
+        time.sleep(fps / 1000)
 
     vcap.release()
     logging.info(f'Stopped')
@@ -563,7 +563,7 @@ def monitor_thread(in_queue, obj_list, mask):
 
     logging.info(f'Started')
     logging.info(f'output dir : {MDP.output_dir}')
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
     fgbg.setBackgroundRatio(default_learning_rate)
     # automatically chosen
@@ -643,18 +643,7 @@ def monitor_thread(in_queue, obj_list, mask):
         # obj_size=(0, ImageUtil.width(ROI)*ImageUtil.height(ROI))
         obj_size = MDP.OBJECT_SIZE
         o = find_object(display_data.fg_image, obj_size)
-        if o.valid:
-            # logging.info(f'Object detected')
-
-            # METHOD1 : Using tracker
-            # th = threading.Thread(None, tracking_thread, "tracking_thread",
-            #                       args=(curr_image, in_queue, (x, y, w, h), obj_list))
-            # th.start()
-            # event_tracking.set()
-            # # pause me
-            # event_monitor.clear()
-
-            # METHOD2 : Just print out
+        if o.c is not None:
             x = o.x + MDP.ROI[0]
             y = o.y + MDP.ROI[1]
             # logging.info(f'tracking: {x}, {y}, {w}, {h}')
@@ -665,7 +654,6 @@ def monitor_thread(in_queue, obj_list, mask):
             cv2.drawContours(display_data.object_image, [o.c + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
             cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {o.s}',
                         (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
-            # logging.info(f'Object size {display_data.index:04d}: {s}')
 
         object_list.append((1 if o.valid else 0, display_data))
         track_object_presence(object_list)
