@@ -16,15 +16,16 @@ from image import ImageUtil, VideoUtil, ImageLoader, FeatureExtractor
 import logging
 from fileutil import create_logging, VideoFileWritingThread, FileUtil
 from mydateutil import DateUtil
-from collections import deque
+from collections import deque, defaultdict
 from telegram import Bot
+from telegram.error import NetworkError, Unauthorized, RetryAfter
 
 
 class MotionDetectionParam:
-    FRAME_SCALE = 1.0
+    FRAME_SCALE = 1
     # Contour area (WIDTH X HEIGHT)
-    OBJECT_SIZE = (100 * 100, 200 * 400)
-    NUM_SKIP_FRAME = 1
+    OBJECT_SIZE = (200 * 100, 200 * 320)
+    NUM_SKIP_FRAME = 0
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
     MAX_OBJECT_SLICE = 200
@@ -40,8 +41,11 @@ class MotionDetectionParam:
     DEBUG = True
     DEBUG_FRAME_TO_FILE = False
     FPS = None
-    show_window_flag = [True, True, False, False, False]
-    send_video = True
+    show_window_flag = [False, True, False, False, False]
+    # 1 : Send all
+    # 2 : Send confident video
+    # 3 : Do not send
+    send_video = 3
 
 
 class TelegramData:
@@ -100,6 +104,16 @@ class DisplayData:
         self.roi_image = None
 
 
+class ObjectShape:
+    valid = False
+    x = None
+    y = None
+    w = None
+    h = None
+    s = None
+    c = None
+
+
 def send_video_thread(writing_thread_handle, filename, logprob):
 
     writing_thread_handle.join(30)
@@ -112,11 +126,29 @@ def send_video_thread(writing_thread_handle, filename, logprob):
     logger.info(f'{filename}')
     # d=datetime.datetime.fromtimestamp(v.createdtime, datetime.timezone.utc)
     msg = f'순심이 확률(log): {logprob:.2f}'
-    TelegramData.bot.send_message(chat_id=TelegramData.CHAT_ID, text=msg)
-    TelegramData.bot.send_video(chat_id=TelegramData.CHAT_ID,
-                                caption=fn,
-                                video=open(filename, 'rb'),
-                                timeout=120)
+
+    retry_count = 0
+    while retry_count < 1:
+        try:
+            TelegramData.bot.send_message(chat_id=TelegramData.CHAT_ID, text=msg)
+            TelegramData.bot.send_video(chat_id=TelegramData.CHAT_ID,
+                                        caption=fn,
+                                        video=open(filename, 'rb'),
+                                        timeout=120)
+            break
+
+        except NetworkError:
+            logging.info('Exception : NetworkError')
+            retry_count += 1
+            time.sleep(10)
+            continue
+
+        except RetryAfter:
+            logging.info('Exception : RetryAfter')
+            retry_count += 1
+            time.sleep(10)
+            continue
+
     logging.info('Finished')
 
 
@@ -138,9 +170,10 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
     logging.info('Connected.')
 
     logging.info(f'Estimating FPS')
-    hw_fps, fps = VideoUtil.estimate_fps(vcap)
+    fps, hw_fps = VideoUtil.estimate_fps(vcap)
     logging.info(f'FPS : {hw_fps:.1f}(device), {fps:.1f}(estimated)')
-    MDP.FPS = min(hw_fps, fps)
+    # MDP.FPS = min(hw_fps, fps)
+    MDP.FPS = fps
 
     w = int(vcap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -166,8 +199,8 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
             frame = imutils.resize(frame, int(w * frame_scale))
 
         # cv2.putText(frame, f'{frame_index-1}', (0, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0))
-        ImageUtil.put_text(frame, f'{frame_index-1}', frame.shape[1]-150, frame.shape[0] - 50,
-                           (0,0,0), (0xaa, 0xaa, 0xaa), 1, 2)
+        ImageUtil.put_text(frame, f'{frame_index-1}', MDP.ROI[2]+20, frame.shape[0] - 50,
+                           (0,0,0), None, 1, 1)
 
         display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
@@ -255,6 +288,35 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
     logging.info(f'Stopped')
 
 
+def identify_object(fgmask, contours, object_size_threshold):
+
+    o = ObjectShape()
+    o.x, o.y, o.w, o.h = cv2.boundingRect(contours[0])
+    o.s = cv2.contourArea(contours[0])
+    # logging.info(f'contourArea : {s}')
+    o.c = contours[0]
+
+    classify = {}
+
+    roiw = ImageUtil.width(MDP.ROI)
+    roih = ImageUtil.height(MDP.ROI)
+
+    classify['size'] = (1 if object_size_threshold[1] > o.s >= object_size_threshold[0] else 0, o.s)
+    # classify['width'] = (1 if roiw * 0.2 < w <= roiw * 0.8 else 0, w)
+    # classify['height'] = (1 if roih * 0.2 < h <= roih * 0.7 else 0, h)
+
+    # logging.info(f'contourArea : {s}, min: {object_size_threshold[0]}, max: {object_size_threshold[1]}')
+    # center of mass feature
+    # logging.info(f'CX={CX}')
+    # logging.info(f'CY={CY}')
+
+    if len(classify) == np.sum([x[0] for x in classify.values()]):
+        o.valid = True
+        return o
+
+    return o
+
+
 def find_object(fgmask, object_size_threshold):
     lbound = 240
     ubound = 255
@@ -266,7 +328,7 @@ def find_object(fgmask, object_size_threshold):
     contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     ncon = len(contours)
     if ncon < 1:
-        return [None] * 6
+        return ObjectShape()
 
     # method#1 : contour bounding box
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
@@ -281,17 +343,14 @@ def find_object(fgmask, object_size_threshold):
     #     CX.append(cx)
     #     CY.append(cy)
 
-    x, y, w, h = cv2.boundingRect(contours[0])
-    s = cv2.contourArea(contours[0])
-    # logging.info(f'contourArea : {s}')
-    if object_size_threshold[1] > s >= object_size_threshold[0]:
-        # logging.info(f'contourArea : {s}, min: {object_size_threshold[0]}, max: {object_size_threshold[1]}')
-        # center of mass feature
-        # logging.info(f'CX={CX}')
-        # logging.info(f'CY={CY}')
-        return x, y, w, h, s, contours[0]
+    return identify_object(fgmask, contours, object_size_threshold)
 
-    return [None] * 6
+
+def show_status_text(image, text, line_index=0):
+    # ImageUtil.put_text(image, "Stability learning", image.shape[1] - 200,
+    #                    100, (0xff, 0, 0), (0, 0, 0), 1, cv2.LINE_AA)
+    ImageUtil.put_text(image, text, MDP.ROI[2]+20,
+                       70*(line_index+1), (0, 0, 0xff), (0, 0, 0), 0.7, 1)
 
 
 def wait_for_scene_stable(q, w, h, q_window_name=None):
@@ -334,6 +393,10 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
         mse = ((display_data.input_image[hidx, widx, :] - prev_frame[hidx, widx, :]) ** 2).mean(axis=None)
         dq.append(mse)
         prev_frame = display_data.input_image
+
+        display_data.object_image = copy.copy(display_data.input_image)
+        show_status_text(display_data.object_image, "Stabilizing")
+
         # logging.info('fetch frame')
         # logging.info(f'dqsize: {len(dq)}/{maxlen}')
         if len(dq) == maxlen:
@@ -344,7 +407,7 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
                 stability = 0
 
             if stability > 10:
-                logging.info(f'Scene stabilized: var={v:.2f} stability={stability}')
+                logging.info(f'Scene stabilized: var={v:.2f}')
                 return
         # nskip+=1
 
@@ -373,10 +436,15 @@ def write_object_slice(obj_queue, smoothed_object_status):
     for x in obj_queue:
         make_overlay_image(x)
         q.append(x.object_image)
+
     filename = obj_queue[0].time.replace(microsecond=0).isoformat() + '.mp4'
     filename = FileUtil.make_valid_filename(filename)
-    if len(q) < 70:
+
+    confidence_level = 1 if len(q) < 70 else 2
+
+    if confidence_level == 1:
         filename = FileUtil.make_suffix_filename(filename, '-suspicious')
+
     filepath = MDP.output_dir + filename
     logging.info(f'Writing file from {obj_queue[0].index}: {len(q)} frames to {filepath} with {MDP.FPS:.1f} fps.')
     logprob = get_object_slice_prob(smoothed_object_status)
@@ -387,8 +455,10 @@ def write_object_slice(obj_queue, smoothed_object_status):
     if MDP.DEBUG:
         logging.info(f'object_slice (log prob = {logprob:.2f}): \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status)}]')
 
-    if MDP.send_video:
+    if confidence_level >= MDP.send_video:
         send_video(th, filepath, logprob)
+    else:
+        logging.info(f'Confidence level ={confidence_level}, send_video value={MDP.send_video}')
 
 
 def track_object_presence(obj_queue):
@@ -484,6 +554,10 @@ def track_object_presence(obj_queue):
     #     plt.close(fig)
 
 
+def show_latency(latency):
+    logging.info(f'Monitoring latency : {latency:.1f}')
+
+
 def monitor_thread(in_queue, obj_list, mask):
     default_learning_rate = 0.005
 
@@ -495,6 +569,7 @@ def monitor_thread(in_queue, obj_list, mask):
     # automatically chosen
     learning_rate = -1
     retry_count = 0
+    loop_count = 0
     prev_image = None
     curr_image = None
     # wait until event is set,
@@ -512,8 +587,10 @@ def monitor_thread(in_queue, obj_list, mask):
         try:
             display_data = in_queue.popleft()
             latency = (datetime.now() - display_data.time).seconds
-            if display_data.index % 100 == 0:
+            loop_count += 1
+            if loop_count % 500 == 0:
                 logging.info(f'Monitoring latency : {latency:.1f}')
+                loop_count = 0
         except IndexError:
             if retry_count == 10:
                 logging.info(f'No frame left in in_queue : tried {retry_count} times')
@@ -540,7 +617,7 @@ def monitor_thread(in_queue, obj_list, mask):
         # scene change detection. input color should be preserved
         scene_changed, similarity = detect_scene_change(prev_image, curr_image, mask)
         if scene_changed:
-            logging.info(f'scene_changed {display_data.index:04d}: {similarity}')
+            logging.info(f'Scene_changed {display_data.index:04d}: {similarity}')
             wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0], 'source')
             object_list.clear()
             logging.info(f'Object list is cleared')
@@ -548,7 +625,7 @@ def monitor_thread(in_queue, obj_list, mask):
             continue
 
         if learning_rate == 1:
-            logging.info(f'Re-learning scene from now {display_data.index:04d}')
+            logging.info(f'Re-learning scene and detecting object from now {display_data.index:04d}')
             fgbg.apply(curr_image, None, 1)
             learning_rate = default_learning_rate
             fgbg.setBackgroundRatio(learning_rate)
@@ -560,12 +637,13 @@ def monitor_thread(in_queue, obj_list, mask):
         display_data.model_image = fgbg.getBackgroundImage()
         display_data.fg_image = fgmask
         display_data.object_image = copy.copy(display_data.input_image)
+        show_status_text(display_data.object_image, "Detecting")
 
         # TODO: remove debugging code
         # obj_size=(0, ImageUtil.width(ROI)*ImageUtil.height(ROI))
         obj_size = MDP.OBJECT_SIZE
-        x, y, w, h, s, con = find_object(display_data.fg_image, obj_size)
-        if w is not None:
+        o = find_object(display_data.fg_image, obj_size)
+        if o.valid:
             # logging.info(f'Object detected')
 
             # METHOD1 : Using tracker
@@ -577,19 +655,19 @@ def monitor_thread(in_queue, obj_list, mask):
             # event_monitor.clear()
 
             # METHOD2 : Just print out
-            x = x + MDP.ROI[0]
-            y = y + MDP.ROI[1]
+            x = o.x + MDP.ROI[0]
+            y = o.y + MDP.ROI[1]
             # logging.info(f'tracking: {x}, {y}, {w}, {h}')
 
-            cv2.rectangle(display_data.object_image, (x, y), (x + w, y + h), (255, 255, 0), 2)
+            cv2.rectangle(display_data.object_image, (x, y), (x + o.w, y + o.h), (255, 255, 0), 2)
             cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]),
                           (220, 220, 220), 2)
-            cv2.drawContours(display_data.object_image, [con + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
-            cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {s}',
+            cv2.drawContours(display_data.object_image, [o.c + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
+            cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {o.s}',
                         (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
             # logging.info(f'Object size {display_data.index:04d}: {s}')
 
-        object_list.append((1 if w is not None else 0, display_data))
+        object_list.append((1 if o.valid else 0, display_data))
         track_object_presence(object_list)
         display_queue.append(display_data)
 
@@ -620,24 +698,26 @@ def read_param(argv):
     # case if GStreamer is used as backend Note that each video stream or IP camera feed has its own URL scheme.
     # Please refer to the documentation of source stream to know the right URL.
     MDP.video_source = argv[1]
-    if not os.path.exists(MDP.video_source):
-        # logging.info(f'File not found : {MDP.video_source}')
-        MDP.output_dir = f'data/MotionDetector-{DateUtil.get_current_timestring()}/'
-    else:
-        MDP.output_dir = os.path.join(os.path.dirname(MDP.video_source),
-                                      os.path.splitext(os.path.basename(MDP.video_source))[0]) + '/'
+    # if not os.path.exists(MDP.video_source):
+    #     MDP.output_dir = f'log/MotionDetector-{DateUtil.get_current_timestring()}/'
+    # else:
+    #     MDP.output_dir = os.path.join(os.path.dirname(MDP.video_source),
+    #                                   os.path.splitext(os.path.basename(MDP.video_source))[0]) + '/'
     # if MDP.DEBUG_FRAME_TO_FILE:
+    MDP.output_dir = f'log/MotionDetector-{DateUtil.get_current_timestring()}/'
+
+
     try:
         plt.ioff()
-        os.mkdir(MDP.output_dir)
+        os.makedirs(MDP.output_dir)
     except FileExistsError:
         pass
     finally:
         if not os.path.exists(MDP.output_dir):
             raise RuntimeError(f"Cannot create directory : {MDP.output_dir}")
 
-    if os.path.exists('telegram.json'):
-        with open('telegram.json') as fd:
+    if os.path.exists('config/telegram.json'):
+        with open('config/telegram.json') as fd:
             cf = json.load(fd)
             TelegramData.CHAT_ID = cf['bot_chatid']
             TelegramData.TOKEN = cf['bot_token']
@@ -669,8 +749,16 @@ def make_overlay_image(display_data):
     if display_data.object_image is None or display_data.fg_image is None or display_data.model_image is None:
         return
 
+    iw = display_data.object_image.shape[1]
+    ih = display_data.object_image.shape[0]
+    rw = display_data.model_image.shape[1]
+    rh = display_data.model_image.shape[0]
+
     dx, dy = (20, 20)
     line_width = 2
+    hr = 0.5 * (ih-dy*3)*0.5 / ih
+    rw = hr
+
     # fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
     fg_image_color = cv2.applyColorMap(display_data.fg_image, cv2.COLORMAP_BONE)
 
@@ -679,12 +767,12 @@ def make_overlay_image(display_data):
     display_data.object_image, nw, nh = ImageUtil.overlay_image(copy.copy(display_data.object_image),
                                                                 fg_image_color,
                                                                 dx, dy,
-                                                                int(display_data.object_image.shape[1] * 0.25))
+                                                                int(display_data.object_image.shape[1] * rw))
     cv2.rectangle(display_data.object_image, (dx, dy), (dx+nw, dy+nh), (64, 64, 64), line_width)
     display_data.object_image, nw, nh = ImageUtil.overlay_image(copy.copy(display_data.object_image),
                                                                 model_image_color,
                                                                 dx, nh + 2*dy,
-                                                                int(display_data.object_image.shape[1] * 0.25))
+                                                                int(display_data.object_image.shape[1] * rw))
     cv2.rectangle(display_data.object_image, (dx, nh + 2*dy), (nw + dx, 2*(nh + dy)), (64, 64, 64), line_width)
 
 
@@ -725,7 +813,7 @@ def main_thread():
         if q_len > 0:
             display_data = display_queue.popleft()
             # logging.info(f'Updating image')
-            if display_data.input_image is not None:
+            if display_data.input_image is not None and MDP.show_window_flag[2]:
                 cv2.imshow('source', display_data.input_image)
             if display_data.model_image is not None and MDP.show_window_flag[2]:
                 cv2.imshow('Model', display_data.model_image)

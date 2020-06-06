@@ -97,7 +97,7 @@ class VideoUtil:
         # Start default camera
         # video = cv2.VideoCapture(video_source)
 
-        cv2_fps = video.get(cv2.CAP_PROP_FPS)
+        cv2_fps = video.get(cv2.CAP_PROP_FPS) / 1000.
 
         # Start time
         start = time.time()
@@ -174,7 +174,7 @@ class ImageUtil:
         newoverlay = imutils.resize(overlay, w)
         nw = newoverlay.shape[1]
         nh = newoverlay.shape[0]
-        newimage[y:y + nh, x:x + nw] = newoverlay
+        newimage[y:min(bh, y + nh), x:min(bw, x + nw)] = newoverlay
 
         return newimage, nw, nh
 
@@ -188,13 +188,15 @@ class ImageUtil:
 
         flags = cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_EXPANDED | cv2.WINDOW_KEEPRATIO
 
-        cv2.namedWindow(wn[0], flags)
-        cv2.moveWindow(wn[0], 0, 0)
-        cv2.resizeWindow(wn[0], nw, nh)
+        if show_flag[0]:
+            cv2.namedWindow(wn[0], flags)
+            cv2.moveWindow(wn[0], 0, 0)
+            cv2.resizeWindow(wn[0], nw, nh)
 
-        cv2.namedWindow(wn[1], flags)
-        cv2.moveWindow(wn[1], 0, hm + nh)
-        cv2.resizeWindow(wn[1], nw, nh)
+        if show_flag[1]:
+            cv2.namedWindow(wn[1], flags)
+            cv2.moveWindow(wn[1], 0, hm + nh)
+            cv2.resizeWindow(wn[1], nw, nh)
 
         if show_flag[2]:
             cv2.namedWindow(wn[2], flags)
@@ -231,8 +233,10 @@ class ImageUtil:
         sz = cv2.getTextSize(text, face, scale, thickness)
         w = sz[0][0]
         h = sz[0][1]
-        cv2.rectangle(image, (max(0, x-m), max(0, y-h-m)), (x+w+m, y+m), bg_color, thickness=cv2.FILLED)
+        if bg_color is not None:
+            cv2.rectangle(image, (max(0, x-m), max(0, y-h-m)), (x+w+m, y+m), bg_color, thickness=cv2.FILLED)
         cv2.putText(image, text, (x, y), face, scale, fg_color, thickness)
+
 
 class FeatureExtractor:
     def __init__(self, image, roi, filename=None):

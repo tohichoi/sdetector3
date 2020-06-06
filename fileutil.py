@@ -75,7 +75,7 @@ class VideoFileWritingThread(threading.Thread):
         self.q = args[0]
         self.info = args[1]
         self.filename = args[2]
-        self.fps = args[3]
+        self.fps = min(30, args[3])
 
     def run(self):
         n = len(self.q)
