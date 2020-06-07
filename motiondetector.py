@@ -45,7 +45,7 @@ class MotionDetectionParam:
     # 1 : Send all
     # 2 : Send confident video
     # 3 : Do not send
-    send_video = 3
+    send_video = 1
 
 
 class TelegramData:
