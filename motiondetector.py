@@ -743,8 +743,15 @@ def read_param(argv):
             TelegramData.bot = Bot(TelegramData.TOKEN)
 
 
-def writing_display_image_thread(q, output_dir):
+def write_display_image_thread(q, output_dir):
     logging.info(f'Started')
+    prev_mse = 0
+    nsamples = 100
+
+    widx = None
+    hidx = None
+    prev_frame = None
+
     while True:
         if not event_capture_ready.wait():
             logging.info(f'Waiting for capturing time out')
@@ -754,17 +761,31 @@ def writing_display_image_thread(q, output_dir):
         if display_data is None:
             break
 
+        # if widx is None:
+        widx = np.random.randint(display_data.input_image.shape[1], size=nsamples)
+        # if hidx is None:
+        hidx = np.random.randint(display_data.input_image.shape[0], size=nsamples)
+        if prev_frame is None:
+            prev_frame = np.zeros_like(display_data.input_image)
+
         if not os.path.exists(output_dir):
             logging.info(f'Directory not exists : {output_dir}')
             break
 
-        if MDP.DEBUG_FRAME_TO_FILE >= 1:
-            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-input.png', display_data.input_image)
+        mse = ((display_data.input_image[hidx, widx, :] - prev_frame[hidx, widx, :]) ** 2).mean(axis=None)
+        write_condition = mse > 20
+        # logging.info(f'mse: {mse}')
 
-        if MDP.DEBUG_FRAME_TO_FILE >= 2:
-            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-model.png', display_data.model_image)
-            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-foreground.png', display_data.fg_image)
-            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-object.png', display_data.object_image)
+        if write_condition:
+            if MDP.DEBUG_FRAME_TO_FILE >= 1:
+                cv2.imwrite(f'{output_dir}/{display_data.index:08d}-input.png', display_data.input_image)
+
+            if MDP.DEBUG_FRAME_TO_FILE >= 2:
+                cv2.imwrite(f'{output_dir}/{display_data.index:08d}-model.png', display_data.model_image)
+                cv2.imwrite(f'{output_dir}/{display_data.index:08d}-foreground.png', display_data.fg_image)
+                cv2.imwrite(f'{output_dir}/{display_data.index:08d}-object.png', display_data.object_image)
+
+        prev_frame = copy.copy(display_data.input_image)
 
     logging.info(f'Finished')
 
@@ -820,7 +841,7 @@ def main_thread():
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
                                   args=(input_queue, object_list, mask))
-    th_write_file = threading.Thread(None, writing_display_image_thread, "display_image_writing_thread",
+    th_write_file = threading.Thread(None, write_display_image_thread, "display_image_writing_thread",
                                      args=(file_queue, MDP.output_dir))
 
     # start capture
