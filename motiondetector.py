@@ -24,13 +24,13 @@ from telegram.error import NetworkError, Unauthorized, RetryAfter
 class MotionDetectionParam:
     FRAME_SCALE = 1
     # Contour area (WIDTH X HEIGHT)
-    OBJECT_SIZE = (200 * 100, 200 * 320)
+    OBJECT_SIZE = (200 * 100, 200 * 400)
     NUM_SKIP_FRAME = 0
-    NUM_SKIP_DISPLAY_FRAME = 1
+    NUM_SKIP_DISPLAY_FRAME = 0
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
     MAX_OBJECT_SLICE = 200
-    MOVING_WINDOW_SIZE = 35
+    MOVING_WINDOW_SIZE = 20
     VIDEO_ORG_WIDTH = -1
     VIDEO_ORG_HEIGHT = -1
     # scaled width
@@ -40,7 +40,7 @@ class MotionDetectionParam:
     video_source = None
     output_dir = None
     DEBUG = True
-    DEBUG_FRAME_TO_FILE = False
+    DEBUG_FRAME_TO_FILE = True
     FPS = None
     show_window_flag = [False, True, False, False, False]
     # 1 : Send all
@@ -48,6 +48,7 @@ class MotionDetectionParam:
     # 3 : Do not send
     send_video = 1
     mask = None
+    mask_area = None
 
 
 class TelegramData:
@@ -107,13 +108,14 @@ class DisplayData:
 
 
 class ObjectShape:
-    valid = False
+    valid = 0
     x = None
     y = None
     w = None
     h = None
     s = None
     c = None
+    i = None
 
 
 def send_video_thread(writing_thread_handle, filename, logprob):
@@ -208,7 +210,7 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
         display_data.input_image = frame
         in_queue.append(display_data)
 
-        time.sleep(fps / 1000)
+        # time.sleep(fps / 1000)
 
     vcap.release()
     logging.info(f'Stopped')
@@ -290,20 +292,22 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
     logging.info(f'Stopped')
 
 
-def identify_object(fgmask, contours, object_size_threshold):
+def identify_object(display_data, contours, object_size_threshold):
 
     o = ObjectShape()
     o.x, o.y, o.w, o.h = cv2.boundingRect(contours[0])
     o.s = cv2.contourArea(contours[0])
     # logging.info(f'contourArea : {s}')
     o.c = contours[0]
-
+    o.i = cv2.mean(display_data.roi_image, mask=display_data.fg_image)[0]
     classify = {}
 
     roiw = ImageUtil.width(MDP.ROI)
     roih = ImageUtil.height(MDP.ROI)
 
     classify['size'] = (1 if object_size_threshold[1] > o.s >= object_size_threshold[0] else 0, o.s)
+    classify['intensity'] = (1 if o.i > 150 else 0, o.i)
+
     # classify['width'] = (1 if roiw * 0.2 < w <= roiw * 0.8 else 0, w)
     # classify['height'] = (1 if roih * 0.2 < h <= roih * 0.7 else 0, h)
 
@@ -313,19 +317,19 @@ def identify_object(fgmask, contours, object_size_threshold):
     # logging.info(f'CY={CY}')
 
     if len(classify) == np.sum([x[0] for x in classify.values()]):
-        o.valid = True
+        o.valid = 1
         return o
 
     return o
 
 
-def find_object(fgmask, object_size_threshold):
+def find_object(display_data, object_size_threshold):
     lbound = 240
     ubound = 255
     ncon = 0
 
     # mask = cv2.inRange(fgmask, lbound, ubound)
-    _, mask = cv2.threshold(fgmask, 128, 255, cv2.THRESH_BINARY)
+    _, mask = cv2.threshold(display_data.fg_image, 128, 255, cv2.THRESH_BINARY)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     ncon = len(contours)
@@ -345,7 +349,7 @@ def find_object(fgmask, object_size_threshold):
     #     CX.append(cx)
     #     CY.append(cy)
 
-    return identify_object(fgmask, contours, object_size_threshold)
+    return identify_object(display_data, contours, object_size_threshold)
 
 
 def show_status_text(image, text, line_index=0):
@@ -466,7 +470,7 @@ def write_object_slice(obj_queue, smoothed_object_status):
 def track_object_presence(obj_queue):
 
     # Tracking Analysis.ipynb 참조
-    object_status = [x[0] for x in obj_queue]
+    object_status = [x[0].valid for x in obj_queue]
     # if MDP.DEBUG:
     #     logging.info(f'object_status : {"".join(str(x) for x in object_status)}')
 
@@ -518,11 +522,15 @@ def track_object_presence(obj_queue):
             e1 = None
 
     object_slice = None
+    object_size_slice = None
+    object_intensity_slice = None
     # step#3 : 0 부터 e1 까지 지운다
     # if len([x is None for x in [s0, e0, s1, e1]])==0:
     # print(f'{s0}, {e0}, {s1}, {e1}')
     if [s0, e0, s1, e1].count(None) < 1:
         object_slice = [obj_queue[i][1] for i in range(s1, e1)]
+        object_size_slice = [obj_queue[i][0].s for i in range(s1, e1)]
+        object_intensity_slice = [obj_queue[i][0].i for i in range(s1, e1)]
         del_slice(obj_queue, 0, e1)
         # del object_status[:e1]
         # smoothed_object_status = np.delete(smoothed_object_status, np.s_[:e1])
@@ -540,8 +548,25 @@ def track_object_presence(obj_queue):
         # print(f'object_status : {object_status}')
 
     if object_slice:
-        # logging.info(f'To be write : { " ".join([str(x.index) for x in object_slice])}')
-        write_object_slice(object_slice, smoothed_object_status[s1:e1])
+        # 일정 크기 이상인 영역이 포함되어있으면 reject
+        reject_condition = {}
+        s = []
+        i = []
+        if object_size_slice:
+            s = [x for x in object_size_slice if x is not None and x > 0.5 * MDP.mask_area]
+            reject_condition['size'] = len(s) > 0
+
+        if object_intensity_slice:
+            i = [x for x in object_intensity_slice if x is not None and x < 100]
+            reject_condition['intensity'] = len(i) > 0
+
+        if len(reject_condition) == len([x for x in reject_condition.values() if x is True]):
+            logging.info(f'Dropping object slice due to abnormal area : {s}')
+            logging.info(f'Dropping object slice due to abnormal intensity : {i}')
+        else:
+            # logging.info(f'To be write : { " ".join([str(x.index) for x in object_slice])}')
+            write_object_slice(object_slice, smoothed_object_status[s1:e1])
+
     #     if MDP.DEBUG:
     #         x = range(s1, e1)
     #         n = len(smoothed_object_status[s1:e1])
@@ -639,14 +664,14 @@ def monitor_thread(in_queue, obj_list, mask):
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
         display_data.model_image = fgbg.getBackgroundImage()
-        display_data.fg_image = fgmask
+        display_data.fg_image = fgmask if display_data.index > 10 else np.zeros_like(fgmask)
         display_data.object_image = copy.copy(display_data.input_image)
         show_status_text(display_data.object_image, "Detecting")
 
         # TODO: remove debugging code
         # obj_size=(0, ImageUtil.width(ROI)*ImageUtil.height(ROI))
         obj_size = MDP.OBJECT_SIZE
-        o = find_object(display_data.fg_image, obj_size)
+        o = find_object(display_data, obj_size)
         if o.c is not None:
             x = o.x + MDP.ROI[0]
             y = o.y + MDP.ROI[1]
@@ -656,10 +681,10 @@ def monitor_thread(in_queue, obj_list, mask):
             cv2.rectangle(display_data.object_image, (MDP.ROI[0], MDP.ROI[1]), (MDP.ROI[2], MDP.ROI[3]),
                           (220, 220, 220), 2)
             cv2.drawContours(display_data.object_image, [o.c + [MDP.ROI[0], MDP.ROI[1]]], 0, (0, 0, 255), thickness=3)
-            cv2.putText(display_data.fg_image, f'contourArea {display_data.index:04d}: {o.s}',
-                        (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255))
+            cv2.putText(display_data.fg_image, f'S: {o.s:.0f}, I: {o.i:.0f}',
+                        (0, display_data.fg_image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 64, 0))
 
-        object_list.append((1 if o.valid else 0, display_data))
+        object_list.append((o, display_data))
         track_object_presence(object_list)
         display_queue.append(display_data)
 
@@ -781,6 +806,9 @@ def main_thread():
     mask = ImageLoader.read_image('data/mask1.png')
     mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
     mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).astype('uint8')
+    contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    MDP.mask_area = cv2.contourArea(contours[0])
+
     th_capture = threading.Thread(None, capture_thread, "capture_thread",
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
@@ -805,11 +833,12 @@ def main_thread():
             break
 
         if q_len > 0:
+            display_data = display_queue.popleft()
+
             frame_index += 1
             if MDP.NUM_SKIP_DISPLAY_FRAME > 0 and frame_index % (MDP.NUM_SKIP_DISPLAY_FRAME + 1) != 0:
                 continue
 
-            display_data = display_queue.popleft()
             # logging.info(f'Updating image')
             if display_data.input_image is not None and MDP.show_window_flag[2]:
                 cv2.imshow('source', display_data.input_image)
