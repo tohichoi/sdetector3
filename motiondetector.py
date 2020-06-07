@@ -40,7 +40,10 @@ class MotionDetectionParam:
     video_source = None
     output_dir = None
     DEBUG = True
-    DEBUG_FRAME_TO_FILE = True
+    # 0 : Do not write
+    # 1 : Write input when detected
+    # 2 : Write all
+    DEBUG_FRAME_TO_FILE = 1
     FPS = None
     show_window_flag = [False, True, False, False, False]
     # 1 : Send all
@@ -85,15 +88,16 @@ def clock():
 
 # from opencv sample
 class StatValue:
-    def __init__(self, smooth_coef = 0.5):
+    def __init__(self, smooth_coef=0.5):
         self.value = None
         self.smooth_coef = smooth_coef
+
     def update(self, v):
         if self.value is None:
             self.value = v
         else:
             c = self.smooth_coef
-            self.value = c * self.value + (1.0-c) * v
+            self.value = c * self.value + (1.0 - c) * v
 
 
 class DisplayData:
@@ -119,7 +123,6 @@ class ObjectShape:
 
 
 def send_video_thread(writing_thread_handle, filename, logprob):
-
     writing_thread_handle.join(30)
     if writing_thread_handle.is_alive():
         logging.info(f'{writing_thread_handle.name} is still running. Aborting message sending.')
@@ -196,15 +199,15 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
             break
 
         frame_index += 1
-        if nskipframe > 0 and frame_index % (nskipframe+1) != 0:
+        if nskipframe > 0 and frame_index % (nskipframe + 1) != 0:
             continue
 
         if frame_scale != 1:
             frame = imutils.resize(frame, int(w * frame_scale))
 
         # cv2.putText(frame, f'{frame_index-1}', (0, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0))
-        ImageUtil.put_text(frame, f'{frame_index-1}', MDP.ROI[2]+20, frame.shape[0] - 50,
-                           (0,0,0), None, 1, 1)
+        ImageUtil.put_text(frame, f'{frame_index - 1}', MDP.ROI[2] + 20, frame.shape[0] - 50,
+                           (0, 0, 0), None, 1, 1)
 
         display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
@@ -293,7 +296,6 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
 
 
 def identify_object(display_data, contours, object_size_threshold):
-
     o = ObjectShape()
     o.x, o.y, o.w, o.h = cv2.boundingRect(contours[0])
     o.s = cv2.contourArea(contours[0])
@@ -355,8 +357,8 @@ def find_object(display_data, object_size_threshold):
 def show_status_text(image, text, line_index=0):
     # ImageUtil.put_text(image, "Stability learning", image.shape[1] - 200,
     #                    100, (0xff, 0, 0), (0, 0, 0), 1, cv2.LINE_AA)
-    ImageUtil.put_text(image, text, MDP.ROI[2]+20,
-                       70*(line_index+1), (0, 0, 0xff), (0, 0, 0), 0.7, 1)
+    ImageUtil.put_text(image, text, MDP.ROI[2] + 20,
+                       70 * (line_index + 1), (0, 0, 0xff), (0, 0, 0), 0.7, 1)
 
 
 def wait_for_scene_stable(q, w, h, q_window_name=None):
@@ -373,7 +375,7 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
     widx = np.random.randint(w, size=nsamples)
     hidx = np.random.randint(h, size=nsamples)
 
-    last_frame_number=0
+    last_frame_number = 0
     retry_count = 0
     # nskip=1
     while True:
@@ -383,7 +385,8 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
             retry_count = 0
         except IndexError:
             if retry_count == 10:
-                logging.info(f'No frame left in in_queue (last frame : {last_frame_number}) : retrying {retry_count + 1}')
+                logging.info(
+                    f'No frame left in in_queue (last frame : {last_frame_number}) : retrying {retry_count + 1}')
                 break
             retry_count += 1
             time.sleep(0.5)
@@ -429,7 +432,6 @@ def del_slice(q, s, e):
 
 
 def get_object_slice_prob(smoothed_object_status):
-
     # 0 이상인 값을 추출한다
     s = smoothed_object_status
 
@@ -459,7 +461,8 @@ def write_object_slice(obj_queue, smoothed_object_status):
     th.start()
 
     if MDP.DEBUG:
-        logging.info(f'object_slice (log prob = {logprob:.2f}): \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status)}]')
+        logging.info(
+            f'object_slice (log prob = {logprob:.2f}): \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status)}]')
 
     if confidence_level >= MDP.send_video:
         send_video(th, filepath, logprob)
@@ -468,7 +471,6 @@ def write_object_slice(obj_queue, smoothed_object_status):
 
 
 def track_object_presence(obj_queue):
-
     # Tracking Analysis.ipynb 참조
     object_status = [x[0].valid for x in obj_queue]
     # if MDP.DEBUG:
@@ -545,7 +547,7 @@ def track_object_presence(obj_queue):
     #     ax[2].plot(x, np.ones(n) * T)
     #     ax[2].plot(x, np.array(object_status), 'o')
     #     ax[2].set_title('Remaining object sequence')
-        # print(f'object_status : {object_status}')
+    # print(f'object_status : {object_status}')
 
     if object_slice:
         # 일정 크기 이상인 영역이 포함되어있으면 reject
@@ -647,7 +649,8 @@ def monitor_thread(in_queue, obj_list, mask):
         scene_changed, similarity = detect_scene_change(prev_image, curr_image, mask)
         if scene_changed:
             logging.info(f'Scene_changed {display_data.index:04d}: {similarity}')
-            wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0], 'source')
+            wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0],
+                                  'source')
             object_list.clear()
             logging.info(f'Object list is cleared')
             learning_rate = 1
@@ -723,7 +726,6 @@ def read_param(argv):
     # if MDP.DEBUG_FRAME_TO_FILE:
     MDP.output_dir = f'log/MotionDetector-{DateUtil.get_current_timestring()}/'
 
-
     try:
         plt.ioff()
         os.makedirs(MDP.output_dir)
@@ -754,11 +756,16 @@ def writing_display_image_thread(q, output_dir):
 
         if not os.path.exists(output_dir):
             logging.info(f'Directory not exists : {output_dir}')
-            continue
+            break
 
-        cv2.imwrite(f'{output_dir}/{display_data.index:08d}-model.png', display_data.model_image)
-        cv2.imwrite(f'{output_dir}/{display_data.index:08d}-foreground.png', display_data.fg_image)
-        cv2.imwrite(f'{output_dir}/{display_data.index:08d}-object.png', display_data.object_image)
+        if MDP.DEBUG_FRAME_TO_FILE >= 1:
+            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-input.png', display_data.input_image)
+
+        if MDP.DEBUG_FRAME_TO_FILE >= 2:
+            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-model.png', display_data.model_image)
+            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-foreground.png', display_data.fg_image)
+            cv2.imwrite(f'{output_dir}/{display_data.index:08d}-object.png', display_data.object_image)
+
     logging.info(f'Finished')
 
 
@@ -773,7 +780,7 @@ def make_overlay_image(display_data):
 
     dx, dy = (20, 20)
     line_width = 2
-    hr = 0.5 * (ih-dy*3)*0.5 / ih
+    hr = 0.5 * (ih - dy * 3) * 0.5 / ih
     rw = hr
 
     # fg_image_color = cv2.cvtColor(display_data.fg_image, cv2.COLOR_GRAY2BGR)
@@ -785,23 +792,23 @@ def make_overlay_image(display_data):
                                                                 fg_image_color,
                                                                 dx, dy,
                                                                 int(display_data.object_image.shape[1] * rw))
-    cv2.rectangle(display_data.object_image, (dx, dy), (dx+nw, dy+nh), (64, 64, 64), line_width)
+    cv2.rectangle(display_data.object_image, (dx, dy), (dx + nw, dy + nh), (64, 64, 64), line_width)
     display_data.object_image, nw, nh = ImageUtil.overlay_image(copy.copy(display_data.object_image),
                                                                 model_image_color,
-                                                                dx, nh + 2*dy,
+                                                                dx, nh + 2 * dy,
                                                                 int(display_data.object_image.shape[1] * rw))
-    cv2.rectangle(display_data.object_image, (dx, nh + 2*dy), (nw + dx, 2*(nh + dy)), (64, 64, 64), line_width)
+    cv2.rectangle(display_data.object_image, (dx, nh + 2 * dy), (nw + dx, 2 * (nh + dy)), (64, 64, 64), line_width)
 
 
 def main_thread():
-
     read_param(sys.argv)
 
     logging.info(f'Reading video parameters from {MDP.video_source}')
     read_video_params(MDP.video_source)
 
     ImageUtil.create_image_window("source", MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT,
-                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 1, show_flag=MDP.show_window_flag)
+                                  ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 1,
+                                  show_flag=MDP.show_window_flag)
 
     mask = ImageLoader.read_image('data/mask1.png')
     mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
@@ -813,8 +820,8 @@ def main_thread():
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
                                   args=(input_queue, object_list, mask))
-    th_display = threading.Thread(None, writing_display_image_thread, "display_image_writing_thread",
-                                  args=(file_queue, MDP.output_dir))
+    th_write_file = threading.Thread(None, writing_display_image_thread, "display_image_writing_thread",
+                                     args=(file_queue, MDP.output_dir))
 
     # start capture
     th_capture.start()
@@ -823,7 +830,7 @@ def main_thread():
     event_monitor.set()
     th_monitor.start()
 
-    th_display.start()
+    th_write_file.start()
 
     frame_index = 0
     while True:
@@ -851,7 +858,7 @@ def main_thread():
             if display_data.object_image is not None:
                 cv2.imshow('Detector', display_data.object_image)
 
-            if MDP.DEBUG_FRAME_TO_FILE:
+            if MDP.DEBUG_FRAME_TO_FILE > 0:
                 file_queue.put(display_data)
 
         if cv2.waitKey(50) == ord('q'):
