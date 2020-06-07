@@ -26,6 +26,7 @@ class MotionDetectionParam:
     # Contour area (WIDTH X HEIGHT)
     OBJECT_SIZE = (200 * 100, 200 * 320)
     NUM_SKIP_FRAME = 0
+    NUM_SKIP_DISPLAY_FRAME = 1
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
     MAX_OBJECT_SLICE = 200
@@ -46,6 +47,7 @@ class MotionDetectionParam:
     # 2 : Send confident video
     # 3 : Do not send
     send_video = 1
+    mask = None
 
 
 class TelegramData:
@@ -603,10 +605,12 @@ def monitor_thread(in_queue, obj_list, mask):
         retry_count = 0
 
         display_data.roi_image = ImageUtil.crop(display_data.input_image, MDP.ROI)
+        mask2 = ImageUtil.crop(mask, MDP.ROI)
         display_data.roi_image = cv2.cvtColor(display_data.roi_image, cv2.COLOR_BGR2GRAY)
         # not good result
         # roi_frame = cv2.equalizeHist(roi_frame)
         display_data.roi_image = cv2.GaussianBlur(display_data.roi_image, None, 3)
+        display_data.roi_image = ImageUtil.get_mask_roi_image(display_data.roi_image, mask2)
 
         if prev_image is None:
             prev_image = display_data.roi_image
@@ -776,6 +780,7 @@ def main_thread():
 
     mask = ImageLoader.read_image('data/mask1.png')
     mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
+    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).astype('uint8')
     th_capture = threading.Thread(None, capture_thread, "capture_thread",
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
@@ -792,6 +797,7 @@ def main_thread():
 
     th_display.start()
 
+    frame_index = 0
     while True:
         q_len = len(display_queue)
         if event_stop_thread.wait(0.0001) and q_len < 1:
@@ -799,6 +805,10 @@ def main_thread():
             break
 
         if q_len > 0:
+            frame_index += 1
+            if MDP.NUM_SKIP_DISPLAY_FRAME > 0 and frame_index % (MDP.NUM_SKIP_DISPLAY_FRAME + 1) != 0:
+                continue
+
             display_data = display_queue.popleft()
             # logging.info(f'Updating image')
             if display_data.input_image is not None and MDP.show_window_flag[2]:

@@ -156,6 +156,11 @@ class ImageUtil:
         return mask
 
     @staticmethod
+    def get_mask_roi_image(frame, mask):
+        res = cv2.bitwise_and(frame, frame, mask=mask)
+        return res
+
+    @staticmethod
     def show_image(image, waitkey=50):
         title = 'temp'
         cv2.imshow(title, image)
