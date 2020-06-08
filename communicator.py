@@ -107,7 +107,7 @@ def start(update, context):
 def status(update, context):
     last_logfile = find_last_logfile()
 
-    s = subprocess.check_output(['tail', last_logfile])
+    s = subprocess.check_output(['tail', last_logfile]).decode("utf-8")
 
     context.bot.send_message(chat_id=update.effective_chat.id, text=s)
 
