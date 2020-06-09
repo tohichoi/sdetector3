@@ -17,6 +17,9 @@ from threading import Timer
 
 def find_last_logfile():
     filelist=glob.glob('log/*.txt')
+    if len(filelist) < 1:
+        return None
+
     filelist2 = sorted(filelist, key=os.path.getmtime, reverse=True)
 
     # ftime = []
@@ -108,8 +111,10 @@ def start(update, context):
 
 def status(update, context):
     last_logfile = find_last_logfile()
-
-    s = subprocess.check_output(['tail', last_logfile]).decode("utf-8")
+    if last_logfile is None:
+        s = '로그파일이 없는데? 순탐이가 실행중인가?'
+    else:
+        s = subprocess.check_output(['tail', last_logfile]).decode("utf-8")
 
     context.bot.send_message(chat_id=update.effective_chat.id, text=s)
 

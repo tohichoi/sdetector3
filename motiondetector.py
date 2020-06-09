@@ -6,8 +6,8 @@ import sys
 import threading
 import time
 import copy
-from datetime import datetime
-from queue import Queue
+import datetime
+from queue import Queue, Empty
 import json
 import imutils
 import numpy as np
@@ -21,6 +21,7 @@ from mydateutil import DateUtil
 from collections import deque, defaultdict
 from telegram import Bot
 from telegram.error import NetworkError, Unauthorized, RetryAfter
+import maya
 
 
 class MotionDetectionParam:
@@ -40,6 +41,7 @@ class MotionDetectionParam:
     VIDEO_WIDTH = -1
     # scaled height
     VIDEO_HEIGHT = -1
+    reporting_time = (datetime.time(hour=7, minute=0, second=0), datetime.time(hour=23, minute=0, second=0))
     video_source = None
     output_dir = None
     DEBUG = True
@@ -108,7 +110,7 @@ class StatValue:
 class DisplayData:
     def __init__(self, index=0, timestamp=0):
         self.index = index
-        self.time = timestamp if timestamp > 0 else datetime.now()
+        self.time = timestamp if timestamp > 0 else datetime.datetime.now()
         self.input_image = None
         self.model_image = None
         self.fg_image = None
@@ -127,18 +129,34 @@ class ObjectShape:
     i = None
 
 
-def notify_alive_thread(last_frame_q):
+def notify_alive_thread(last_frame_q, message_q):
     # while not event_stop_thread.wait(60*60):
     #     image = last_frame_queue.get()
     #     filename = MDP.output_dir + 'last_frame.png'
     #     cv2.imwrite(filename, image)
-
     logging.info('Started')
 
-    while not event_stop_thread.wait(MDP.REPORT_SECONDS * 0.5):
-        image = last_frame_q.get()
-        if image is None:
-            break
+    st = maya.parse(MDP.reporting_time[0])
+    et = maya.parse(MDP.reporting_time[1])
+
+    logging.info(f'Reporting hour : {st.hour:}h to {et.hour}h')
+    while not event_stop_thread.wait(0):
+        logging.info(f'processing queue')
+        try:
+            image = last_frame_q.get(True, MDP.REPORT_SECONDS * 0.5)
+            if image is None:
+                logging.info(f'Exit message received')
+                break
+        except Empty:
+            continue
+
+        nt = maya.parse(datetime.datetime.now())
+        # logging.info(f'Start time: {st}\nEnd time: {et}\nNow: {now}')
+
+        if not(st.hour <= nt.hour < et.hour):
+            # logging.info(f'Start time: {st}\nEnd time: {et}\nNow: {now}')
+            logging.info("Notification is off")
+            continue
 
         filename = MDP.output_dir + 'last_frame.png'
         cv2.imwrite(filename, image)
@@ -146,7 +164,10 @@ def notify_alive_thread(last_frame_q):
         retry_count = 0
         while retry_count < 10:
             try:
+                logging.info(f'sending alive message')
+                message_q.put('순탐이는 살아있다!')
                 TelegramData.bot.send_photo(chat_id=TelegramData.CHAT_ID, photo=open(filename, 'rb'))
+                logging.info(f'alive message sent')
                 break
 
             except NetworkError:
@@ -164,12 +185,12 @@ def notify_alive_thread(last_frame_q):
     logging.info('Finished')
 
 
-def send_message_thread(msg_queue):
+def send_message_thread(message_q):
 
     logging.info('Started')
 
     while True:
-        message = msg_queue.get()
+        message = message_q.get()
         if message is None:
             break
 
@@ -241,7 +262,7 @@ def send_video(writing_thread_handle, filename, logprob):
     th.start()
 
 
-def capture_thread(video_source, in_queue, nskipframe, frame_scale):
+def capture_thread(video_source, input_q, last_frame_q, nskipframe, frame_scale):
     logging.info(f'Started')
 
     logging.info(f'Connecting to device {video_source} ...')
@@ -259,9 +280,9 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
 
     event_capture_ready.set()
 
-    last_check_time = datetime.now()
+    last_check_time = datetime.datetime.now()
     frame_index = 0
-    while not event_stop_thread.wait(0.001):
+    while not event_stop_thread.wait(0):
         ret, frame = vcap.read()
         if not ret:
             logging.info('Video decoding error occurred.')
@@ -284,12 +305,13 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
 
         display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
-        in_queue.append(display_data)
+        input_q.append(display_data)
 
         dt = display_data.time - last_check_time
+        # logging.info(f'report seconds: {dt.seconds}')
         if dt.seconds > MDP.REPORT_SECONDS:
             last_check_time = display_data.time
-            last_frame_queue.put(copy.copy(display_data.object_image))
+            last_frame_q.put(copy.copy(display_data.input_image))
 
         # time.sleep(fps / 1000)
 
@@ -310,7 +332,7 @@ def detect_scene_change(prev_image, curr_image, mask):
     return scene_changed, similarity
 
 
-def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
+def tracking_thread(curr_image, input_q, init_bbox, output_q):
     logging.info(f'Started')
 
     OPENCV_OBJECT_TRACKERS = {
@@ -330,9 +352,9 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
     tracker.init(curr_image, init_bbox)
 
     retry_count = 0
-    while not event_stop_thread.wait(0.0001):
+    while not event_stop_thread.wait(0):
         try:
-            display_data = in_queue.popleft()
+            display_data = input_q.popleft()
             frame = display_data.input_image
             retry_count = 0
         except IndexError:
@@ -362,7 +384,7 @@ def tracking_thread(curr_image, in_queue, init_bbox, out_queue):
                           (220, 220, 220), 2)
 
             display_queue.append(display_data)
-            out_queue.put(display_data)
+            output_q.put(display_data)
         else:
             logging.info(f'object lost')
             # resume monitor thread
@@ -439,7 +461,7 @@ def show_status_text(image, text, line_index=0):
                        70 * (line_index + 1), (0, 0, 0xff), (0, 0, 0), 0.7, 1)
 
 
-def wait_for_scene_stable(q, w, h, q_window_name=None):
+def wait_for_scene_stable(input_q, w, h, q_window_name=None):
     prev_frame = None
     is_first = True
     stability = 0
@@ -458,7 +480,9 @@ def wait_for_scene_stable(q, w, h, q_window_name=None):
     # nskip=1
     while True:
         try:
-            display_data = q.popleft()
+            display_data = input_q.popleft()
+            if display_data is None:
+                break
             last_frame_number = display_data.index
             retry_count = 0
         except IndexError:
@@ -517,13 +541,13 @@ def get_object_slice_prob(smoothed_object_status):
     return np.sum(np.log(s[np.where(s > 0)[0]]))
 
 
-def write_object_slice(obj_queue, smoothed_object_status):
+def write_object_slice(object_q, smoothed_object_status):
     q = deque()
-    for x in obj_queue:
+    for x in object_q:
         make_overlay_image(x)
         q.append(x.object_image)
 
-    filename = obj_queue[0].time.replace(microsecond=0).isoformat() + '.mp4'
+    filename = object_q[0].time.replace(microsecond=0).isoformat() + '.mp4'
     filename = FileUtil.make_valid_filename(filename)
 
     confidence_level = 1 if len(q) < 70 else 2
@@ -532,7 +556,7 @@ def write_object_slice(obj_queue, smoothed_object_status):
         filename = FileUtil.make_suffix_filename(filename, '-suspicious')
 
     filepath = MDP.output_dir + filename
-    logging.info(f'Writing file from {obj_queue[0].index}: {len(q)} frames to {filepath} with {MDP.FPS:.1f} fps.')
+    logging.info(f'Writing file from {object_q[0].index}: {len(q)} frames to {filepath} with {MDP.FPS:.1f} fps.')
     logprob = get_object_slice_prob(smoothed_object_status)
     th = VideoFileWritingThread(name=f'VideoFileWritingThread',
                                 args=(q, f'{logprob:.2f}', filepath, MDP.FPS))
@@ -548,9 +572,9 @@ def write_object_slice(obj_queue, smoothed_object_status):
         logging.info(f'Confidence level ={confidence_level}, send_video value={MDP.send_video}')
 
 
-def track_object_presence(obj_queue):
+def track_object_presence(object_q):
     # Tracking Analysis.ipynb 참조
-    object_status = [x[0].valid for x in obj_queue]
+    object_status = [x[0].valid for x in object_q]
     # if MDP.DEBUG:
     #     logging.info(f'object_status : {"".join(str(x) for x in object_status)}')
 
@@ -578,7 +602,7 @@ def track_object_presence(obj_queue):
     idx = np.argwhere(smoothed_object_status >= T)
     if len(idx) == 0:
         # del object_status[0:n-frame_margin]
-        del_slice(obj_queue, 0, n - frame_margin)
+        del_slice(object_q, 0, n - frame_margin)
         # print(f'연속적으로 T 이상인 구간이 없음 {object_status}')
     else:
         s0 = int(idx[0])
@@ -608,10 +632,10 @@ def track_object_presence(obj_queue):
     # if len([x is None for x in [s0, e0, s1, e1]])==0:
     # print(f'{s0}, {e0}, {s1}, {e1}')
     if [s0, e0, s1, e1].count(None) < 1:
-        object_slice = [obj_queue[i][1] for i in range(s1, e1)]
-        object_size_slice = [obj_queue[i][0].s for i in range(s1, e1)]
-        object_intensity_slice = [obj_queue[i][0].i for i in range(s1, e1)]
-        del_slice(obj_queue, 0, e1)
+        object_slice = [object_q[i][1] for i in range(s1, e1)]
+        object_size_slice = [object_q[i][0].s for i in range(s1, e1)]
+        object_intensity_slice = [object_q[i][0].i for i in range(s1, e1)]
+        del_slice(object_q, 0, e1)
         # del object_status[:e1]
         # smoothed_object_status = np.delete(smoothed_object_status, np.s_[:e1])
 
@@ -665,7 +689,7 @@ def show_latency(latency):
     logging.info(f'Monitoring latency : {latency:.1f}')
 
 
-def monitor_thread(in_queue, obj_list, mask):
+def monitor_thread(input_q, obj_list, mask):
     default_learning_rate = 0.005
 
     logging.info(f'Started')
@@ -688,19 +712,14 @@ def monitor_thread(in_queue, obj_list, mask):
 
     mask2 = ImageUtil.crop(mask, MDP.ROI)
 
-    while event_monitor.wait():
-        if event_stop_thread.wait(0.0001):
-            obj_list.append(None)
-            break
-
+    while not event_stop_thread.wait(0):
         if not event_capture_ready.wait(120.0):
             logging.info(f'Capturing is not ready in 120 seconds.')
-            obj_list.append(None)
             break
 
         try:
-            display_data = in_queue.popleft()
-            latency = (datetime.now() - display_data.time).seconds
+            display_data = input_q.popleft()
+            latency = (datetime.datetime.now() - display_data.time).seconds
             loop_count += 1
             if loop_count % 1000 == 0:
                 logging.info(f'Monitoring latency : {latency:.1f}')
@@ -708,7 +727,6 @@ def monitor_thread(in_queue, obj_list, mask):
         except IndexError:
             if retry_count == 12:
                 logging.info(f'No frame in in_queue : tried {retry_count} times')
-                obj_list.append(None)
                 break
             # else:
             #     logging.info(f'No frame in in_queue : retrying {retry_count}')
@@ -735,7 +753,7 @@ def monitor_thread(in_queue, obj_list, mask):
         scene_changed, similarity = detect_scene_change(prev_image, curr_image, mask)
         if scene_changed:
             logging.info(f'Scene changed {display_data.index:04d}: KL Divergence = {similarity:.2f}')
-            wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0],
+            wait_for_scene_stable(input_q, display_data.input_image.shape[1], display_data.input_image.shape[0],
                                   'source')
             object_list.clear()
             logging.info(f'Object list is cleared')
@@ -776,6 +794,8 @@ def monitor_thread(in_queue, obj_list, mask):
         object_list.append((o, display_data))
         track_object_presence(object_list)
         display_queue.append(display_data)
+
+    obj_list.append(None)
 
     logging.info(f'Stopped')
 
@@ -839,7 +859,7 @@ def read_param(argv):
         TelegramData.bot = Bot(TelegramData.TOKEN)
 
 
-def write_display_image_thread(q, output_dir):
+def write_display_image_thread(input_q, output_dir):
     logging.info(f'Started')
     nsamples = 1000
 
@@ -852,7 +872,7 @@ def write_display_image_thread(q, output_dir):
             logging.info(f'Waiting for capturing time out')
             break
 
-        display_data = q.get()
+        display_data = input_q.get()
         if display_data is None:
             break
 
@@ -929,31 +949,26 @@ def main_thread():
                                   show_flag=MDP.show_window_flag)
 
     th_capture = threading.Thread(None, capture_thread, "capture_thread",
-                                  args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
+                                  args=(MDP.video_source, input_queue, last_frame_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
                                   args=(input_queue, object_list, MDP.mask))
     th_write_file = threading.Thread(None, write_display_image_thread, "write_display_image_thread",
                                      args=(file_queue, MDP.output_dir))
     th_send_message = threading.Thread(None, send_message_thread, "send_message_thread", args=(message_queue,))
 
-    th_notify_alive = threading.Thread(None, notify_alive_thread, "notify_alive_thread", args=(last_frame_queue,))
+    th_notify_alive = threading.Thread(None, notify_alive_thread, "notify_alive_thread", args=(last_frame_queue,message_queue))
 
     # start capture
     th_capture.start()
-
-    # start monitor thread
-    event_monitor.set()
     th_monitor.start()
-
     th_write_file.start()
-
     th_send_message.start()
+    th_notify_alive.start()
 
     frame_index = 0
     while True:
         q_len = len(display_queue)
-        if event_stop_thread.wait(0.0001) and q_len < 1:
-            file_queue.put(None)
+        if event_stop_thread.wait(0):
             break
 
         if q_len > 0:
@@ -979,15 +994,15 @@ def main_thread():
                 file_queue.put(display_data)
 
         if cv2.waitKey(50) == ord('q'):
-            file_queue.put(None)
+            event_stop_thread.set()
             break
 
-    event_monitor.set()
-    event_stop_thread.set()
+    event_monitor.clear()
 
+    file_queue.put(None)
+    last_frame_queue.put(None)
     message_queue.put('순탐이 종료!')
     message_queue.put(None)
-    last_frame_queue.put(None)
 
     logging.info(f'Stopped')
 
