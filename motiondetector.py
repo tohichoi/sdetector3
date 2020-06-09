@@ -49,7 +49,7 @@ class MotionDetectionParam:
     # 1 : Send all
     # 2 : Send confident video
     # 3 : Do not send
-    send_video = 1
+    send_video = 3
     mask = None
     mask_area = None
 
@@ -594,7 +594,11 @@ def monitor_thread(in_queue, obj_list, mask):
     logging.info(f'output dir : {MDP.output_dir}')
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
-    fgbg.setBackgroundRatio(default_learning_rate)
+    # fgbg = cv2.createBackgroundSubtractorKNN()
+
+    # fgbg.setBackgroundRatio(0.01)
+    fgbg.setHistory(300)
+    # fgbg.setShadowThreshold(0.8)
     # automatically chosen
     learning_rate = -1
     retry_count = 0
@@ -603,6 +607,9 @@ def monitor_thread(in_queue, obj_list, mask):
     curr_image = None
     # wait until event is set,
     latency = 0
+
+    mask2 = ImageUtil.crop(mask, MDP.ROI)
+
     while event_monitor.wait():
         if event_stop_thread.wait(0.0001):
             obj_list.append(None)
@@ -632,7 +639,6 @@ def monitor_thread(in_queue, obj_list, mask):
         retry_count = 0
 
         display_data.roi_image = ImageUtil.crop(display_data.input_image, MDP.ROI)
-        mask2 = ImageUtil.crop(mask, MDP.ROI)
         display_data.roi_image = cv2.cvtColor(display_data.roi_image, cv2.COLOR_BGR2GRAY)
         # not good result
         # roi_frame = cv2.equalizeHist(roi_frame)
@@ -708,6 +714,13 @@ def read_video_params(vsrc):
 
     vcap.release()
 
+    mask = ImageLoader.read_image('data/mask1.png')
+    mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
+    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).astype('uint8')
+    contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    MDP.mask = mask
+    MDP.mask_area = cv2.contourArea(contours[0])
+
 
 def read_param(argv):
     # name of video file (eg. video.avi)
@@ -735,12 +748,15 @@ def read_param(argv):
         if not os.path.exists(MDP.output_dir):
             raise RuntimeError(f"Cannot create directory : {MDP.output_dir}")
 
-    if os.path.exists('config/telegram.json'):
-        with open('config/telegram.json') as fd:
-            cf = json.load(fd)
-            TelegramData.CHAT_ID = cf['bot_chatid']
-            TelegramData.TOKEN = cf['bot_token']
-            TelegramData.bot = Bot(TelegramData.TOKEN)
+    telegram_config = 'config/telegram.json'
+    if not os.path.exists(telegram_config):
+        raise RuntimeError(f"Cannot find directory : {telegram_config}")
+
+    with open(telegram_config) as fd:
+        cf = json.load(fd)
+        TelegramData.CHAT_ID = cf['bot_chatid']
+        TelegramData.TOKEN = cf['bot_token']
+        TelegramData.bot = Bot(TelegramData.TOKEN)
 
 
 def write_display_image_thread(q, output_dir):
@@ -822,26 +838,22 @@ def make_overlay_image(display_data):
 
 
 def main_thread():
+
     read_param(sys.argv)
 
     logging.info(f'Reading video parameters from {MDP.video_source}')
+
     read_video_params(MDP.video_source)
 
     ImageUtil.create_image_window("source", MDP.VIDEO_WIDTH, MDP.VIDEO_HEIGHT,
                                   ImageUtil.width(MDP.ROI), ImageUtil.height(MDP.ROI), 1,
                                   show_flag=MDP.show_window_flag)
 
-    mask = ImageLoader.read_image('data/mask1.png')
-    mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
-    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).astype('uint8')
-    contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    MDP.mask_area = cv2.contourArea(contours[0])
-
     th_capture = threading.Thread(None, capture_thread, "capture_thread",
                                   args=(MDP.video_source, input_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
-                                  args=(input_queue, object_list, mask))
-    th_write_file = threading.Thread(None, write_display_image_thread, "display_image_writing_thread",
+                                  args=(input_queue, object_list, MDP.mask))
+    th_write_file = threading.Thread(None, write_display_image_thread, "write_display_image_thread",
                                      args=(file_queue, MDP.output_dir))
 
     # start capture
