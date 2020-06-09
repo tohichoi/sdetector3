@@ -615,8 +615,8 @@ def monitor_thread(in_queue, obj_list, mask):
             obj_list.append(None)
             break
 
-        if not event_capture_ready.wait(60.0):
-            logging.info(f'Waiting for capturing time out')
+        if not event_capture_ready.wait(120.0):
+            logging.info(f'Capturing is not ready in 120 seconds.')
             obj_list.append(None)
             break
 
@@ -624,16 +624,18 @@ def monitor_thread(in_queue, obj_list, mask):
             display_data = in_queue.popleft()
             latency = (datetime.now() - display_data.time).seconds
             loop_count += 1
-            if loop_count % 500 == 0:
+            if loop_count % 1000 == 0:
                 logging.info(f'Monitoring latency : {latency:.1f}')
                 loop_count = 0
         except IndexError:
-            if retry_count == 10:
-                logging.info(f'No frame left in in_queue : tried {retry_count} times')
+            if retry_count == 12:
+                logging.info(f'No frame in in_queue : tried {retry_count} times')
                 obj_list.append(None)
                 break
+            # else:
+            #     logging.info(f'No frame in in_queue : retrying {retry_count}')
             retry_count += 1
-            time.sleep(1)
+            time.sleep(10)
             continue
 
         retry_count = 0
@@ -761,8 +763,7 @@ def read_param(argv):
 
 def write_display_image_thread(q, output_dir):
     logging.info(f'Started')
-    prev_mse = 0
-    nsamples = 100
+    nsamples = 1000
 
     widx = None
     hidx = None
