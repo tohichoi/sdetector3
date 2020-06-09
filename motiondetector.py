@@ -1,3 +1,5 @@
+# encoding: utf-8
+
 import re
 import os
 import sys
@@ -31,6 +33,7 @@ class MotionDetectionParam:
     SCENE_CHANGE_THRESHOLD = 0.4
     MAX_OBJECT_SLICE = 200
     MOVING_WINDOW_SIZE = 20
+    REPORT_SECONDS = 60*60
     VIDEO_ORG_WIDTH = -1
     VIDEO_ORG_HEIGHT = -1
     # scaled width
@@ -68,6 +71,8 @@ input_queue = deque()
 display_queue = deque()
 object_list = deque()
 file_queue = Queue()
+message_queue = Queue()
+last_frame_queue = Queue()
 
 event_stop_thread = threading.Event()
 event_stop_thread.clear()
@@ -120,6 +125,73 @@ class ObjectShape:
     s = None
     c = None
     i = None
+
+
+def notify_alive_thread(last_frame_q):
+    # while not event_stop_thread.wait(60*60):
+    #     image = last_frame_queue.get()
+    #     filename = MDP.output_dir + 'last_frame.png'
+    #     cv2.imwrite(filename, image)
+
+    logging.info('Started')
+
+    while not event_stop_thread.wait(MDP.REPORT_SECONDS * 0.5):
+        image = last_frame_q.get()
+        if image is None:
+            break
+
+        filename = MDP.output_dir + 'last_frame.png'
+        cv2.imwrite(filename, image)
+
+        retry_count = 0
+        while retry_count < 10:
+            try:
+                TelegramData.bot.send_photo(chat_id=TelegramData.CHAT_ID, photo=open(filename, 'rb'))
+                break
+
+            except NetworkError:
+                logging.info('Exception : NetworkError')
+                retry_count += 1
+                time.sleep(10)
+                continue
+
+            except RetryAfter:
+                logging.info('Exception : RetryAfter')
+                retry_count += 1
+                time.sleep(10)
+                continue
+
+    logging.info('Finished')
+
+
+def send_message_thread(msg_queue):
+
+    logging.info('Started')
+
+    while True:
+        message = msg_queue.get()
+        if message is None:
+            break
+
+        retry_count = 0
+        while retry_count < 10:
+            try:
+                TelegramData.bot.send_message(chat_id=TelegramData.CHAT_ID, text=message)
+                break
+
+            except NetworkError:
+                logging.info('Exception : NetworkError')
+                retry_count += 1
+                time.sleep(10)
+                continue
+
+            except RetryAfter:
+                logging.info('Exception : RetryAfter')
+                retry_count += 1
+                time.sleep(10)
+                continue
+
+    logging.info('Finished')
 
 
 def send_video_thread(writing_thread_handle, filename, logprob):
@@ -187,6 +259,7 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
 
     event_capture_ready.set()
 
+    last_check_time = datetime.now()
     frame_index = 0
     while not event_stop_thread.wait(0.001):
         ret, frame = vcap.read()
@@ -212,6 +285,11 @@ def capture_thread(video_source, in_queue, nskipframe, frame_scale):
         display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
         in_queue.append(display_data)
+
+        dt = display_data.time - last_check_time
+        if dt.seconds > MDP.REPORT_SECONDS:
+            last_check_time = display_data.time
+            last_frame_queue.put(copy.copy(display_data.object_image))
 
         # time.sleep(fps / 1000)
 
@@ -656,7 +734,7 @@ def monitor_thread(in_queue, obj_list, mask):
         # scene change detection. input color should be preserved
         scene_changed, similarity = detect_scene_change(prev_image, curr_image, mask)
         if scene_changed:
-            logging.info(f'Scene_changed {display_data.index:04d}: {similarity}')
+            logging.info(f'Scene changed {display_data.index:04d}: KL Divergence = {similarity:.2f}')
             wait_for_scene_stable(in_queue, display_data.input_image.shape[1], display_data.input_image.shape[0],
                                   'source')
             object_list.clear()
@@ -856,6 +934,9 @@ def main_thread():
                                   args=(input_queue, object_list, MDP.mask))
     th_write_file = threading.Thread(None, write_display_image_thread, "write_display_image_thread",
                                      args=(file_queue, MDP.output_dir))
+    th_send_message = threading.Thread(None, send_message_thread, "send_message_thread", args=(message_queue,))
+
+    th_notify_alive = threading.Thread(None, notify_alive_thread, "notify_alive_thread", args=(last_frame_queue,))
 
     # start capture
     th_capture.start()
@@ -865,6 +946,8 @@ def main_thread():
     th_monitor.start()
 
     th_write_file.start()
+
+    th_send_message.start()
 
     frame_index = 0
     while True:
@@ -901,6 +984,10 @@ def main_thread():
 
     event_monitor.set()
     event_stop_thread.set()
+
+    message_queue.put('순탐이 종료!')
+    message_queue.put(None)
+    last_frame_queue.put(None)
 
     logging.info(f'Stopped')
 

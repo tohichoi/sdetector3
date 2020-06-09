@@ -1,3 +1,5 @@
+# encoding: utf-8
+
 import glob
 import subprocess
 import mydateutil
@@ -100,8 +102,8 @@ def restart(update, context):
 
 def start(update, context):
 
-    msg = '/status : 상태 보이기\n/restart : 순탐이 재시작'
-    context.bot.send_message(chat_id=update.effective_chat.id, text="순탐이!")
+    msg = get_help_string()
+    context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
 
 def status(update, context):
