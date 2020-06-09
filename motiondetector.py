@@ -41,7 +41,7 @@ class MotionDetectionParam:
     VIDEO_WIDTH = -1
     # scaled height
     VIDEO_HEIGHT = -1
-    reporting_time = (datetime.time(hour=7, minute=0, second=0), datetime.time(hour=23, minute=0, second=0))
+    reporting_time = (datetime.time(hour=0, minute=0, second=0), datetime.time(hour=23, minute=59, second=59))
     video_source = None
     output_dir = None
     DEBUG = True
@@ -165,8 +165,11 @@ def notify_alive_thread(last_frame_q, message_q):
         while retry_count < 10:
             try:
                 logging.info(f'sending alive message')
-                message_q.put('순탐이는 살아있다!')
-                TelegramData.bot.send_photo(chat_id=TelegramData.CHAT_ID, photo=open(filename, 'rb'))
+                TelegramData.bot.send_photo(chat_id=TelegramData.CHAT_ID,
+                                            photo=open(filename, 'rb'),
+                                            disable_notification=True,
+                                            timeout=30,
+                                            caption='싸라있네!')
                 logging.info(f'alive message sent')
                 break
 

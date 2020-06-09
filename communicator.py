@@ -58,6 +58,7 @@ def get_help_string():
     msg += '/restart : 순탐이 재시작\n'
     msg += '/screen : 스크린샷 보기\n'
     msg += '/kill : 순탐이 종료\n'
+    msg += '/log : 순탐이 실행 로그\n'
 
     return msg
 
@@ -119,6 +120,16 @@ def status(update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text=s)
 
 
+def log(update, context):
+    filename = find_last_logfile()
+    if filename is None:
+        context.bot.send_message(chat_id=update.effective_chat.id, text=f'로그 파일이 없네?')
+        return
+
+    context.bot.send_document(chat_id=update.effective_chat.id,
+                              document=open(filename, 'rb'))
+
+
 if __name__ == '__main__':
 
     logging.basicConfig(level=logging.INFO,
@@ -155,6 +166,9 @@ if __name__ == '__main__':
 
     screen_handler = CommandHandler('screen', screen)
     dispatcher.add_handler(screen_handler)
+
+    log_handler = CommandHandler('log', log)
+    dispatcher.add_handler(log_handler)
 
     logging.info("Starting")
 
