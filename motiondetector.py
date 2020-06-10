@@ -34,7 +34,7 @@ class MotionDetectionParam:
     SCENE_CHANGE_THRESHOLD = 0.4
     MAX_OBJECT_SLICE = 200
     MOVING_WINDOW_SIZE = 20
-    REPORT_SECONDS = 60*60
+    REPORT_SECONDS = 60 * 60
     VIDEO_ORG_WIDTH = -1
     VIDEO_ORG_HEIGHT = -1
     # scaled width
@@ -153,7 +153,7 @@ def notify_alive_thread(last_frame_q, message_q):
         nt = maya.parse(datetime.datetime.now())
         # logging.info(f'Start time: {st}\nEnd time: {et}\nNow: {now}')
 
-        if not(st.hour <= nt.hour < et.hour):
+        if not (st.hour <= nt.hour < et.hour):
             # logging.info(f'Start time: {st}\nEnd time: {et}\nNow: {now}')
             logging.info("Notification is off")
             continue
@@ -189,7 +189,6 @@ def notify_alive_thread(last_frame_q, message_q):
 
 
 def send_message_thread(message_q):
-
     logging.info('Started')
 
     while True:
@@ -259,7 +258,7 @@ def send_video(writing_thread_handle, filename, logprob):
     # q=Config.tg_video_q
     # while not q.empty():
     #     v=q.get()
-    th = threading.Thread(None, send_video_thread, "Send_video_thread",
+    th = threading.Thread(None, send_video_thread, "send_video_thread",
                           (writing_thread_handle, filename, logprob))
 
     th.start()
@@ -292,7 +291,7 @@ def capture_thread(video_source, input_q, last_frame_q, nskipframe, frame_scale)
             break
 
         if frame is None or len(frame) < 1:
-            logging.info('no frame.')
+            logging.info('Device has no more frames')
             break
 
         frame_index += 1
@@ -319,7 +318,7 @@ def capture_thread(video_source, input_q, last_frame_q, nskipframe, frame_scale)
         # time.sleep(fps / 1000)
 
     vcap.release()
-    logging.info(f'Stopped')
+    logging.info(f'Finished')
 
 
 def detect_scene_change(prev_image, curr_image, mask):
@@ -395,7 +394,7 @@ def tracking_thread(curr_image, input_q, init_bbox, output_q):
 
     event_monitor.set()
 
-    logging.info(f'Stopped')
+    logging.info(f'Finished')
 
 
 def identify_object(display_data, contours, object_size_threshold):
@@ -667,7 +666,7 @@ def track_object_presence(object_q):
             i = [x for x in object_intensity_slice if x is not None and x < 100]
             reject_condition['intensity'] = len(i) > 0
 
-        if len(reject_condition) == len([x for x in reject_condition.values() if x is True]):
+        if len([x for x in reject_condition.values() if x is True]) >= 1:
             logging.info(f'Dropping object slice due to abnormal area : {s}')
             logging.info(f'Dropping object slice due to abnormal intensity : {i}')
         else:
@@ -693,16 +692,37 @@ def show_latency(latency):
 
 
 def monitor_thread(input_q, obj_list, mask):
-    default_learning_rate = 0.005
+    # // default parameters of gaussian background detection algorithm
+    # static const int defaultHistory2 = 500; // Learning rate; alpha = 1/defaultHistory2
+    # static const float defaultVarThreshold2 = 4.0f*4.0f;
+    # static const int defaultNMixtures2 = 5; // maximal number of Gaussians in mixture
+    # static const float defaultBackgroundRatio2 = 0.9f; // threshold sum of weights for background test
+    # static const float defaultVarThresholdGen2 = 3.0f*3.0f;
+    # static const float defaultVarInit2 = 15.0f; // initial variance for new components
+    # static const float defaultVarMax2 = 5*defaultVarInit2;
+    # static const float defaultVarMin2 = 4.0f;
+    #
+    # // additional parameters
+    # static const float defaultfCT2 = 0.05f; // complexity reduction prior constant 0 - no reduction of number of components
+    # static const unsigned char defaultnShadowDetection2 = (unsigned char)127; // value to use in the segmentation mask for shadows, set 0 not to do shadow detection
+    # static const float defaultfTau = 0.5f; // Tau - shadow threshold, see the paper for explanation
+
+    # learningRate = learningRate >= 0 && nframes > 1 ? learningRate : 1./std::min( 2*nframes, history );
+    # nframes : apply 가 호출될 때마다 증가
+    # 초당 10 프레임이고 history가 100 이면? 10초
+    #  learning rate = 1/100 = 0.01
+    # 20초
+    history_frame = 1000
+    default_learning_rate = 1. / history_frame
 
     logging.info(f'Started')
     logging.info(f'output dir : {MDP.output_dir}')
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
+    fgbg = cv2.createBackgroundSubtractorMOG2(history=1000, detectShadows=True)
     # fgbg = cv2.createBackgroundSubtractorKNN()
 
     # fgbg.setBackgroundRatio(0.01)
-    fgbg.setHistory(300)
+    # fgbg.setHistory(300)
     # fgbg.setShadowThreshold(0.8)
     # automatically chosen
     learning_rate = -1
@@ -767,7 +787,7 @@ def monitor_thread(input_q, obj_list, mask):
             logging.info(f'Re-learning scene and detecting object from now {display_data.index:04d}')
             fgbg.apply(curr_image, None, 1)
             learning_rate = default_learning_rate
-            fgbg.setBackgroundRatio(learning_rate)
+            # fgbg.setBackgroundRatio(learning_rate)
 
         fgmask = fgbg.apply(curr_image, None, learning_rate)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -800,9 +820,9 @@ def monitor_thread(input_q, obj_list, mask):
 
     obj_list.append(None)
 
-    logging.info(f'Stopped')
-
     event_stop_thread.set()
+
+    logging.info(f'Finished')
 
 
 def read_video_params(vsrc):
@@ -940,7 +960,6 @@ def make_overlay_image(display_data):
 
 
 def main_thread():
-
     read_param(sys.argv)
 
     logging.info(f'Reading video parameters from {MDP.video_source}')
@@ -952,14 +971,16 @@ def main_thread():
                                   show_flag=MDP.show_window_flag)
 
     th_capture = threading.Thread(None, capture_thread, "capture_thread",
-                                  args=(MDP.video_source, input_queue, last_frame_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
+                                  args=(
+                                  MDP.video_source, input_queue, last_frame_queue, MDP.NUM_SKIP_FRAME, MDP.FRAME_SCALE))
     th_monitor = threading.Thread(None, monitor_thread, "monitor_thread",
                                   args=(input_queue, object_list, MDP.mask))
     th_write_file = threading.Thread(None, write_display_image_thread, "write_display_image_thread",
                                      args=(file_queue, MDP.output_dir))
     th_send_message = threading.Thread(None, send_message_thread, "send_message_thread", args=(message_queue,))
 
-    th_notify_alive = threading.Thread(None, notify_alive_thread, "notify_alive_thread", args=(last_frame_queue,message_queue))
+    th_notify_alive = threading.Thread(None, notify_alive_thread, "notify_alive_thread",
+                                       args=(last_frame_queue, message_queue))
 
     # start capture
     th_capture.start()
@@ -1007,7 +1028,7 @@ def main_thread():
     message_queue.put('순탐이 종료!')
     message_queue.put(None)
 
-    logging.info(f'Stopped')
+    logging.info(f'Finished')
 
 
 if __name__ == '__main__':
