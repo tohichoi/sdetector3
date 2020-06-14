@@ -29,11 +29,11 @@ class MotionDetectionParam:
     # Contour area (WIDTH X HEIGHT)
     OBJECT_SIZE = (200 * 100, 200 * 400)
     NUM_SKIP_FRAME = 0
-    NUM_SKIP_DISPLAY_FRAME = 0
+    NUM_SKIP_DISPLAY_FRAME = 2
     ROI = [404, 0, 1070, 680]
     SCENE_CHANGE_THRESHOLD = 0.4
-    MAX_OBJECT_SLICE = 200
-    MOVING_WINDOW_SIZE = 20
+    MAX_OBJECT_SLICE = 300
+    MOVING_WINDOW_SIZE = 30
     REPORT_SECONDS = 60 * 60
     VIDEO_ORG_WIDTH = -1
     VIDEO_ORG_HEIGHT = -1
@@ -44,17 +44,16 @@ class MotionDetectionParam:
     reporting_time = (datetime.time(hour=0, minute=0, second=0), datetime.time(hour=23, minute=59, second=59))
     video_source = None
     output_dir = None
-    DEBUG = True
     # 0 : Do not write
     # 1 : Write input when detected
     # 2 : Write all
-    DEBUG_FRAME_TO_FILE = 1
+    DEBUG_FRAME_TO_FILE = 0
     FPS = None
     show_window_flag = [False, True, False, False, False]
     # 1 : Send all
     # 2 : Send confident video
     # 3 : Do not send
-    send_video = 3
+    send_video = 1
     mask = None
     mask_area = None
 
@@ -303,7 +302,7 @@ def capture_thread(video_source, input_q, last_frame_q, nskipframe, frame_scale)
 
         # cv2.putText(frame, f'{frame_index-1}', (0, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0))
         ImageUtil.put_text(frame, f'{frame_index - 1}', MDP.ROI[2] + 20, frame.shape[0] - 50,
-                           (0, 0, 0), None, 1, 1)
+                           (0, 0, 0), None, 1*MDP.FRAME_SCALE, 1)
 
         display_data = DisplayData(index=frame_index - 1)
         display_data.input_image = frame
@@ -317,6 +316,7 @@ def capture_thread(video_source, input_q, last_frame_q, nskipframe, frame_scale)
 
         # time.sleep(fps / 1000)
 
+    event_stop_thread.set()
     vcap.release()
     logging.info(f'Finished')
 
@@ -410,7 +410,7 @@ def identify_object(display_data, contours, object_size_threshold):
     roih = ImageUtil.height(MDP.ROI)
 
     classify['size'] = (1 if object_size_threshold[1] > o.s >= object_size_threshold[0] else 0, o.s)
-    classify['intensity'] = (1 if o.i > 150 else 0, o.i)
+    classify['intensity'] = (1 if o.i > 130 else 0, o.i)
 
     # classify['width'] = (1 if roiw * 0.2 < w <= roiw * 0.8 else 0, w)
     # classify['height'] = (1 if roih * 0.2 < h <= roih * 0.7 else 0, h)
@@ -460,7 +460,7 @@ def show_status_text(image, text, line_index=0):
     # ImageUtil.put_text(image, "Stability learning", image.shape[1] - 200,
     #                    100, (0xff, 0, 0), (0, 0, 0), 1, cv2.LINE_AA)
     ImageUtil.put_text(image, text, MDP.ROI[2] + 20,
-                       70 * (line_index + 1), (0, 0, 0xff), (0, 0, 0), 0.7, 1)
+                       70 * (line_index + 1), (0, 0, 0xff), (0, 0, 0), 0.7*MDP.FRAME_SCALE, 1)
 
 
 def wait_for_scene_stable(input_q, w, h, q_window_name=None):
@@ -561,12 +561,11 @@ def write_object_slice(object_q, smoothed_object_status):
     logging.info(f'Writing file from {object_q[0].index}: {len(q)} frames to {filepath} with {MDP.FPS:.1f} fps.')
     logprob = get_object_slice_prob(smoothed_object_status)
     th = VideoFileWritingThread(name=f'VideoFileWritingThread',
-                                args=(q, f'{logprob:.2f}', filepath, MDP.FPS))
+                                args=(q, f'{logprob:.2f}', filepath, MDP.FPS, MDP.FRAME_SCALE))
     th.start()
 
-    if MDP.DEBUG:
-        logging.info(
-            f'object_slice (log prob = {logprob:.2f}): \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status)}]')
+    logging.info(
+        f'object_slice (log prob = {logprob:.2f}): \n[{",".join("{:.2f} ".format(x) for x in smoothed_object_status)}]')
 
     if confidence_level >= MDP.send_video:
         send_video(th, filepath, logprob)
@@ -663,7 +662,7 @@ def track_object_presence(object_q):
             reject_condition['size'] = len(s) > 0
 
         if object_intensity_slice:
-            i = [x for x in object_intensity_slice if x is not None and x < 100]
+            i = [x for x in object_intensity_slice if x is not None and x < 90]
             reject_condition['intensity'] = len(i) > 0
 
         if len([x for x in reject_condition.values() if x is True]) >= 1:
@@ -720,8 +719,11 @@ def monitor_thread(input_q, obj_list, mask):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     fgbg = cv2.createBackgroundSubtractorMOG2(history=1000, detectShadows=True)
     # fgbg = cv2.createBackgroundSubtractorKNN()
-
-    # fgbg.setBackgroundRatio(0.01)
+    fgbg.setVarThreshold(16)
+    # fgbg.setNMixtures(5)
+    # 0.8: 223 frame 이 지난후 background
+    # 0.7: 356 frame 이 지난후 background
+    fgbg.setBackgroundRatio(0.6)
     # fgbg.setHistory(300)
     # fgbg.setShadowThreshold(0.8)
     # automatically chosen
@@ -787,7 +789,8 @@ def monitor_thread(input_q, obj_list, mask):
             logging.info(f'Re-learning scene and detecting object from now {display_data.index:04d}')
             fgbg.apply(curr_image, None, 1)
             learning_rate = default_learning_rate
-            # fgbg.setBackgroundRatio(learning_rate)
+            # 51 frame
+            # fgbg.setBackgroundRatio(0.95)
 
         fgmask = fgbg.apply(curr_image, None, learning_rate)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -828,6 +831,20 @@ def monitor_thread(input_q, obj_list, mask):
 def read_video_params(vsrc):
     vcap = cv2.VideoCapture(vsrc)
 
+    logging.info(f'Waiting for opening device {vsrc}')
+    ev = threading.Event()
+    ev.clear()
+    retry = 0
+    while not ev.wait(1):
+        if vcap.isOpened():
+            logging.info('Device is opened')
+            break
+        elif retry == 10:
+            logging.info('Cannot open device')
+            raise Exception()
+
+        retry += 1
+
     MDP.VIDEO_ORG_WIDTH = int(vcap.get(cv2.CAP_PROP_FRAME_WIDTH))
     MDP.VIDEO_ORG_HEIGHT = int(vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     MDP.VIDEO_WIDTH = int(MDP.VIDEO_ORG_WIDTH * MDP.FRAME_SCALE + 0.5)
@@ -837,7 +854,11 @@ def read_video_params(vsrc):
 
     vcap.release()
 
-    mask = ImageLoader.read_image('data/mask1.png')
+    filename = 'data/mask1.png'
+    if not os.path.exists(filename):
+        raise FileNotFoundError(filename)
+    
+    mask = ImageLoader.read_image(filename)
     mask = imutils.resize(mask, MDP.VIDEO_WIDTH)
     mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).astype('uint8')
     contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -881,6 +902,12 @@ def read_param(argv):
         TelegramData.TOKEN = cf['bot_token']
         TelegramData.bot = Bot(TelegramData.TOKEN)
 
+    if os.uname()[1] == 'raspberrypi':
+        MDP.FRAME_SCALE = 0.5
+        # Contour area (WIDTH X HEIGHT)
+        MDP.NUM_SKIP_FRAME = 1
+        MDP.NUM_SKIP_DISPLAY_FRAME = 1
+ 
 
 def write_display_image_thread(input_q, output_dir):
     logging.info(f'Started')

@@ -63,11 +63,18 @@ def get_help_string():
     return msg
 
 
+def __send_message(bot, chat_id, msg):
+    l = __split_message(msg)
+    for m in l:
+        bot.send_message(chat_id=chat_id, text=msg)
+
+
 def help_(update, context):
 
     msg = get_help_string()
 
-    context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    __send_message(context.bot, update.effective_chat.id, msg)
+    # context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
 
 def screen(update, context):
@@ -87,43 +94,67 @@ def kill(update, context):
 
     msg = __kill()
 
-    context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    # context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    __send_message(context.bot, update.effective_chat.id, msg)
+
+
+def __run_motiondetector():
+
+    try:
+        p = subprocess.Popen(['bash', 'run_live.sh'])
+        msg = '순탐이 실행 성공'
+    except subprocess.CalledProcessError as e:
+        msg = '순탐이 실행 오류:\n' + str(e.args)
+
+    return msg
+
+
+def __split_message(s, maxlen=4096):
+
+    buf=[]
+    n=len(s)
+    for i in range(int(n/maxlen)+1):
+        s0=s[i*maxlen:(i+1)*(maxlen)]
+        if len(s0) > 0:
+            buf.append(s0)
+
+    return buf
 
 
 def restart(update, context):
 
     msg = __kill()
-    context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    __send_message(context.bot, update.effective_chat.id, msg)
+    # context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
-    try:
-        p = subprocess.Popen(['bash', 'run_live.sh'])
-        msg = '재실행 성공'
-    except subprocess.CalledProcessError as e:
-        msg = '재실행 오류:\n' + str(e.args)
-
-    context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    msg = __run_motiondetector()
+    __send_message(context.bot, update.effective_chat.id, msg)
+    # context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
 
 def start(update, context):
 
     msg = get_help_string()
-    context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    __send_message(context.bot, update.effective_chat.id, msg)
+    # context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
 
 def status(update, context):
     last_logfile = find_last_logfile()
     if last_logfile is None:
-        s = '로그파일이 없는데? 순탐이가 실행중인가?'
+        msg  = '로그파일이 없는데? 순탐이가 실행중인가?'
     else:
-        s = subprocess.check_output(['tail', last_logfile]).decode("utf-8")
+        msg = subprocess.check_output(['tail', last_logfile]).decode("utf-8")
 
-    context.bot.send_message(chat_id=update.effective_chat.id, text=s)
+    __send_message(context.bot, update.effective_chat.id, msg)
+    # context.bot.send_message(chat_id=update.effective_chat.id, text=s)
 
 
 def log(update, context):
     filename = find_last_logfile()
     if filename is None:
-        context.bot.send_message(chat_id=update.effective_chat.id, text=f'로그 파일이 없네?')
+        __send_message(context.bot, update.effective_chat.id, f'로그 파일이 없네?')
+        # context.bot.send_message(chat_id=update.effective_chat.id, text=f'로그 파일이 없네?')
         return
 
     context.bot.send_document(chat_id=update.effective_chat.id,
@@ -172,7 +203,13 @@ if __name__ == '__main__':
 
     logging.info("Starting")
 
+    msg = __run_motiondetector()
+    logging.info(msg)
+
+    logging.info('before start_polling()')
     updater.start_polling()
+    logging.info('after start_polling()')
+
     updater.idle()
 
-    logging.info("Finishing")
+    logging.info("Finished")

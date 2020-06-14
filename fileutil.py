@@ -75,7 +75,8 @@ class VideoFileWritingThread(threading.Thread):
         self.q = args[0]
         self.info = args[1]
         self.filename = args[2]
-        self.fps = min(20, args[3])
+        self.fps = min(15, args[3])
+        self.text_scale = args[4]
 
     def run(self):
         n = len(self.q)
@@ -94,7 +95,7 @@ class VideoFileWritingThread(threading.Thread):
         while len(self.q) > 0:
             frame = self.q.popleft()
             ImageUtil.put_text(frame, self.info, frame.shape[1] - 150, frame.shape[0] - 120,
-                               (0, 0, 0), (0xff, 0xcd, 0xd2), 1, 2)
+                               (0, 0, 0), (0xff, 0xcd, 0xd2), 0.7*self.text_scale, 2)
             vcap_out.write(frame)
             time.sleep(0.05)
             # logging.info(f'{threading.get_ident()} : {self.q.qsize()}')

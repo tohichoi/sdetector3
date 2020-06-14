@@ -1,0 +1,6 @@
+log
+data/*.avi
+data/*.txt
+config
+__pycache__
+.vscode
