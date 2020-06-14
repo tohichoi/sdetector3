@@ -41,7 +41,8 @@ class MotionDetectionParam:
     VIDEO_WIDTH = -1
     # scaled height
     VIDEO_HEIGHT = -1
-    reporting_time = (datetime.time(hour=0, minute=0, second=0), datetime.time(hour=23, minute=59, second=59))
+    # reporting_time = (datetime.time(hour=7, minute=0, second=0), datetime.time(hour=23, minute=59, second=59))
+    reporting_time = (datetime.time(hour=6, minute=30, second=0), datetime.time(hour=2, minute=0, second=0))
     video_source = None
     output_dir = None
     # 0 : Do not write
@@ -137,8 +138,10 @@ def notify_alive_thread(last_frame_q, message_q):
 
     st = maya.parse(MDP.reporting_time[0])
     et = maya.parse(MDP.reporting_time[1])
+    if et.hour < st.hour:
+        et = et + datetime.timedelta(days=1)
 
-    logging.info(f'Reporting hour : {st.hour:}h to {et.hour}h')
+    logging.info(f'Reporting hour : {st.iso8601():}h to {et.iso8601()}h')
     while not event_stop_thread.wait(0):
         logging.info(f'processing queue')
         try:
