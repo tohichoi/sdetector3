@@ -21,7 +21,6 @@ from mydateutil import DateUtil
 from collections import deque, defaultdict
 from telegram import Bot
 from telegram.error import NetworkError, Unauthorized, RetryAfter
-import maya
 
 
 class MotionDetectionParam:
@@ -136,12 +135,10 @@ def notify_alive_thread(last_frame_q, message_q):
     #     cv2.imwrite(filename, image)
     logging.info('Started')
 
-    st = maya.parse(MDP.reporting_time[0])
-    et = maya.parse(MDP.reporting_time[1])
-    if et.hour < st.hour:
-        et = et + datetime.timedelta(days=1)
+    st = MDP.reporting_time[0]
+    et = MDP.reporting_time[1]
 
-    logging.info(f'Reporting hour : {st.iso8601():}h to {et.iso8601()}h')
+    logging.info(f'Reporting hour : {st.isoformat()} to {et.isoformat()}')
     while not event_stop_thread.wait(0):
         logging.info(f'processing queue')
         try:
@@ -152,10 +149,7 @@ def notify_alive_thread(last_frame_q, message_q):
         except Empty:
             continue
 
-        nt = maya.parse(datetime.datetime.now())
-        # logging.info(f'Start time: {st}\nEnd time: {et}\nNow: {now}')
-
-        if not (st.hour <= nt.hour < et.hour):
+        if not DateUtil.is_time_in_range(st, et):
             # logging.info(f'Start time: {st}\nEnd time: {et}\nNow: {now}')
             logging.info("Notification is off")
             continue
